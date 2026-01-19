@@ -274,11 +274,11 @@ class LogActivity : AppCompatActivity() {
         logcatProcess = null
     }
 
-    @OptIn(DelicateCoroutinesApi::class)
     private fun clearLogcat() {
         try {
-            // Clear the system log buffer
-            Runtime.getRuntime().exec("logcat -c")
+            // Clear the system log buffer and wait for it to complete
+            val clearProcess = Runtime.getRuntime().exec("logcat -c")
+            clearProcess.waitFor() // Wait for the clear command to complete
 
             // Cancel and stop the logcat process and job
             stopLogcat()
@@ -291,6 +291,7 @@ class LogActivity : AppCompatActivity() {
 
             // Clear our in-memory buffer and update adapter to empty state
             logBuffer.clear()
+            entryId = 0L  // Reset entry ID counter to ensure no ID conflicts
             logAdapter.submitList(emptyList())
             if (this::emptyView.isInitialized) {
                 emptyView.visibility = View.VISIBLE
@@ -303,7 +304,10 @@ class LogActivity : AppCompatActivity() {
             // Restart the logcat process
             startLogcat()
             
-            // Ensure UI reflects new state
+            // Ensure UI reflects new state - submit empty list again to ensure clean state
+            logAdapter.submitList(emptyList())
+            
+            // Update adapter to refresh the UI
             updateAdapter()
 
         } catch (e: Exception) {
