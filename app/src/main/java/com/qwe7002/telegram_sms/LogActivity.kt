@@ -122,13 +122,22 @@ class LogActivity : AppCompatActivity() {
     }
 
     private fun startLogConsumer() {
+        // Cancel the previous log consumer job if it exists
+        logConsumerJob?.cancel()
+        
         logConsumerJob = lifecycleScope.launch(Dispatchers.Main) {
-            for (entry in logChannel) {
-                logBuffer.add(entry)
-                if (logBuffer.size > maxLines) {
-                    logBuffer.removeAt(0)
+            try {
+                for (entry in logChannel) {
+                    logBuffer.add(entry)
+                    if (logBuffer.size > maxLines) {
+                        logBuffer.removeAt(0)
+                    }
+                    updateAdapter()
                 }
-                updateAdapter()
+            } catch (e: Exception) {
+                if (e !is java.util.concurrent.CancellationException) {
+                    Log.e(Const.TAG, "Log consumer error: ${e.message}", e)
+                }
             }
         }
     }
@@ -176,7 +185,7 @@ class LogActivity : AppCompatActivity() {
                 var lastTimestamp: String? = null
                 var lastTag: String? = null
 
-                while (isActive) {
+                while (isActive && !logChannel.isClosedForSend) {
                     val line = reader.readLine() ?: break
                     if (line.isNotEmpty() && !line.startsWith("------")) {
                         val parsed = parseLogLine(entryId, line)
@@ -202,7 +211,7 @@ class LogActivity : AppCompatActivity() {
                             lastEntry.continuationLines.add(parsed.message)
                         } else {
                             // Send the previous entry if exists
-                            if (lastEntry != null) {
+                            if (lastEntry != null && !logChannel.isClosedForSend) {
                                 logChannel.trySend(lastEntry)
                             }
                             // Start a new entry
@@ -215,11 +224,13 @@ class LogActivity : AppCompatActivity() {
                 }
 
                 // Send the last entry if exists
-                if (lastEntry != null) {
+                if (lastEntry != null && !logChannel.isClosedForSend) {
                     logChannel.trySend(lastEntry)
                 }
             } catch (e: Exception) {
-                Log.e(Const.TAG, "startLogcat: ${e.message}", e)
+                if (e !is java.util.concurrent.CancellationException) {
+                    Log.e(Const.TAG, "startLogcat: ${e.message}", e)
+                }
             }
         }
     }
@@ -298,7 +309,6 @@ class LogActivity : AppCompatActivity() {
         }
     }
 
-    @OptIn(DelicateCoroutinesApi::class)
     override fun onDestroy() {
         super.onDestroy()
         stopLogcat()
