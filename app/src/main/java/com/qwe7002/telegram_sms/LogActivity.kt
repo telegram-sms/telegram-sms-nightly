@@ -163,9 +163,9 @@ class LogActivity : AppCompatActivity() {
                     level = "V" // Verbose in debug builds
                 }
                 val command = if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.O){
-                    arrayOf("logcat", "${Const.TAG}:${level}","*:S", "-d", "-t", "500","-v","time", "--pid=${android.os.Process.myPid()}")
+                    arrayOf("logcat", "${Const.TAG}:${level}","*:S", "-t", "500","-v","time", "--pid=${android.os.Process.myPid()}")
                 }else{
-                    arrayOf("logcat", "${Const.TAG}:${level}","*:S", "-d", "-t", "500","-v","time")
+                    arrayOf("logcat", "${Const.TAG}:${level}","*:S", "-t", "500","-v","time")
                 }
                 logcatProcess = Runtime.getRuntime().exec(command)
 
@@ -271,7 +271,8 @@ class LogActivity : AppCompatActivity() {
                 emptyView.visibility = View.VISIBLE
                 recyclerView.visibility = View.GONE
             }
-
+            stopLogcat()
+            startLogcat()
             // Ensure UI reflects new state
             updateAdapter()
 
