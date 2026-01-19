@@ -22,6 +22,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.qwe7002.telegram_sms.value.Const
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -36,9 +37,10 @@ class LogActivity : AppCompatActivity() {
     private lateinit var logAdapter: LogAdapter
     private var logcatProcess: Process? = null
     private var logcatJob: Job? = null
+    private var logConsumerJob: Job? = null
     private val maxLines = 500
     private val logBuffer = CopyOnWriteArrayList<LogEntry>()
-    private val logChannel = Channel<LogEntry>(Channel.UNLIMITED)
+    private var logChannel = Channel<LogEntry>(Channel.UNLIMITED)
     private var entryId = 0L
     private lateinit var emptyView: TextView
 
@@ -120,7 +122,7 @@ class LogActivity : AppCompatActivity() {
     }
 
     private fun startLogConsumer() {
-        lifecycleScope.launch(Dispatchers.Main) {
+        logConsumerJob = lifecycleScope.launch(Dispatchers.Main) {
             for (entry in logChannel) {
                 logBuffer.add(entry)
                 if (logBuffer.size > maxLines) {
@@ -259,10 +261,20 @@ class LogActivity : AppCompatActivity() {
         logcatProcess = null
     }
 
+    @OptIn(DelicateCoroutinesApi::class)
     private fun clearLogcat() {
         try {
             // Clear the system log buffer
             Runtime.getRuntime().exec("logcat -c")
+
+            // Cancel and stop the logcat process and job
+            stopLogcat()
+
+            // Close the existing channel and create a new one
+            if (!logChannel.isClosedForSend) {
+                logChannel.close()
+            }
+            logChannel = Channel(Channel.UNLIMITED) // Recreate the channel
 
             // Clear our in-memory buffer and update adapter to empty state
             logBuffer.clear()
@@ -271,8 +283,13 @@ class LogActivity : AppCompatActivity() {
                 emptyView.visibility = View.VISIBLE
                 recyclerView.visibility = View.GONE
             }
-            stopLogcat()
+            
+            // Restart the log consumer coroutine to listen to the new channel
+            startLogConsumer()
+            
+            // Restart the logcat process
             startLogcat()
+            
             // Ensure UI reflects new state
             updateAdapter()
 
@@ -281,10 +298,14 @@ class LogActivity : AppCompatActivity() {
         }
     }
 
+    @OptIn(DelicateCoroutinesApi::class)
     override fun onDestroy() {
         super.onDestroy()
         stopLogcat()
-        logChannel.close()
+        logConsumerJob?.cancel()
+        if (!logChannel.isClosedForSend) {
+            logChannel.close()
+        }
     }
 }
 
