@@ -255,6 +255,14 @@ object SMS {
             Log.i(Const.TAG, "SMS fallback is not turned on.")
             return
         }
+        val keywordList = preferences.getStringSet("fallback_keyword_list", setOf()) ?: setOf()
+        if (keywordList.isNotEmpty()) {
+            val matched = keywordList.any { it.isNotEmpty() && content?.contains(it) == true }
+            if (!matched) {
+                Log.i(Const.TAG, "Fallback SMS content does not match any filter keyword, skipping.")
+                return
+            }
+        }
         val smsManager = if (subId == -1) {
             @Suppress("DEPRECATION")
             SmsManager.getSmsManagerForSubscriptionId(SmsManager.getDefaultSmsSubscriptionId())

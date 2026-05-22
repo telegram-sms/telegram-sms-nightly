@@ -41,6 +41,10 @@
         android:title="@string/spam_sms_keyword_title"
         app:showAsAction="never" />
     <item
+        android:id="@+id/fallback_keyword_menu_item"
+        android:title="@string/fallback_keyword_title"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/set_proxy_menu_item"
         android:title="@string/proxy_title"
         app:showAsAction="never" />

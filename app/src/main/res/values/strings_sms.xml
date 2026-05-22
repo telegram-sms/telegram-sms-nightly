@@ -13,6 +13,9 @@
     <string name="spam_sms_keyword_title">SMS blocklist</string>
     <string name="spam_keyword_edit_title">Edit Keyword</string>
     <string name="spam_keyword_add_title">Add Keyword</string>
+    <string name="fallback_keyword_title">Fallback SMS filter</string>
+    <string name="fallback_keyword_edit_title">Edit Filter Keyword</string>
+    <string name="fallback_keyword_add_title">Add Filter Keyword</string>
     <string name="unable_to_obtain_information">Unable to get message</string>
     <string name="template_title">Template</string>
     <string name="send_sms_title">Send SMS</string>

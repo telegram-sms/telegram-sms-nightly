@@ -74,6 +74,10 @@
             android:name=".SpamActivity"
             android:exported="false"
             android:label="@string/spam_sms_keyword_title" />
+        <activity
+            android:name=".FallbackKeywordActivity"
+            android:exported="false"
+            android:label="@string/fallback_keyword_title" />
 
         <service
             android:name=".ReSendJob"
