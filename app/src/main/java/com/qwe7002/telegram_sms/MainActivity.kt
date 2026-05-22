@@ -895,6 +895,11 @@ class MainActivity : AppCompatActivity() {
                 return true
             }
 
+            R.id.fallback_keyword_menu_item -> {
+                startActivity(Intent(this, FallbackKeywordActivity::class.java))
+                return true
+            }
+
             R.id.cc_menu_item -> {
                 startActivity(Intent(this, CcActivity::class.java))
                 return true
