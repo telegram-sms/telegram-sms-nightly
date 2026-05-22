@@ -16,6 +16,7 @@
     <string name="fallback_keyword_title">Fallback SMS filter</string>
     <string name="fallback_keyword_edit_title">Edit Filter Keyword</string>
     <string name="fallback_keyword_add_title">Add Filter Keyword</string>
+    <string name="fallback_keyword_whitelist_mode">Whitelist mode (forward only matching messages; turn off to forward all except matches)</string>
     <string name="unable_to_obtain_information">Unable to get message</string>
     <string name="template_title">Template</string>
     <string name="send_sms_title">Send SMS</string>

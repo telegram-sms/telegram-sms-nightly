@@ -258,8 +258,10 @@ object SMS {
         val keywordList = preferences.getStringSet("fallback_keyword_list", setOf()) ?: setOf()
         if (keywordList.isNotEmpty()) {
             val matched = keywordList.any { it.isNotEmpty() && content?.contains(it) == true }
-            if (!matched) {
-                Log.i(Const.TAG, "Fallback SMS content does not match any filter keyword, skipping.")
+            val isWhitelist = preferences.getBoolean("fallback_keyword_whitelist", true)
+            val shouldForward = if (isWhitelist) matched else !matched
+            if (!shouldForward) {
+                Log.i(Const.TAG, "Fallback SMS content filtered out by keyword rule, skipping.")
                 return
             }
         }

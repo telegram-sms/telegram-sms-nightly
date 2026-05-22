@@ -13,6 +13,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.floatingactionbutton.FloatingActionButton
+import com.google.android.material.switchmaterial.SwitchMaterial
 import com.tencent.mmkv.MMKV
 
 class FallbackKeywordActivity : AppCompatActivity() {
@@ -31,6 +32,12 @@ class FallbackKeywordActivity : AppCompatActivity() {
         }
         FakeStatusBar().fakeStatusBar(this, window)
         val preferences = MMKV.defaultMMKV()
+        val whitelistSwitch =
+            findViewById<SwitchMaterial>(R.id.fallback_keyword_whitelist_switch)
+        whitelistSwitch.isChecked = preferences.getBoolean("fallback_keyword_whitelist", true)
+        whitelistSwitch.setOnCheckedChangeListener { _, isChecked ->
+            preferences.putBoolean("fallback_keyword_whitelist", isChecked)
+        }
         val fallbackKeywordList =
             preferences.getStringSet("fallback_keyword_list", setOf())?.toMutableList()
                 ?: mutableListOf()
