@@ -2,7 +2,6 @@ package com.qwe7002.telegram_sms
 
 import android.content.DialogInterface
 import android.os.Bundle
-import android.util.Log
 import android.view.View
 import android.widget.AdapterView
 import android.widget.AdapterView.OnItemClickListener
@@ -14,7 +13,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.floatingactionbutton.FloatingActionButton
-import com.qwe7002.telegram_sms.value.Const
 import com.tencent.mmkv.MMKV
 
 class FallbackKeywordActivity : AppCompatActivity() {
@@ -84,7 +82,12 @@ class FallbackKeywordActivity : AppCompatActivity() {
         fallbackKeywordList: MutableList<String>,
         listAdapter: ArrayAdapter<String>
     ) {
-        Log.d(Const.TAG, fallbackKeywordList.toString())
+        val normalized = fallbackKeywordList
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+        fallbackKeywordList.clear()
+        fallbackKeywordList.addAll(normalized)
         MMKV.defaultMMKV().encode("fallback_keyword_list", fallbackKeywordList.toSet())
         listAdapter.notifyDataSetChanged()
     }
