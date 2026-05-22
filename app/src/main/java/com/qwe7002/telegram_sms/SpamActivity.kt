@@ -2,7 +2,6 @@ package com.qwe7002.telegram_sms
 
 import android.content.DialogInterface
 import android.os.Bundle
-import android.util.Log
 import android.view.View
 import android.widget.AdapterView
 import android.widget.AdapterView.OnItemClickListener
@@ -14,7 +13,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.floatingactionbutton.FloatingActionButton
-import com.qwe7002.telegram_sms.value.Const
 import com.tencent.mmkv.MMKV
 
 class SpamActivity : AppCompatActivity() {
@@ -83,7 +81,12 @@ class SpamActivity : AppCompatActivity() {
         blackKeywordList: MutableList<String>,
         listAdapter: ArrayAdapter<String>
     ) {
-        Log.d(Const.TAG, blackKeywordList.toString())
+        val normalized = blackKeywordList
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+        blackKeywordList.clear()
+        blackKeywordList.addAll(normalized)
         MMKV.defaultMMKV().encode("block_keyword_list", blackKeywordList.toSet())
         listAdapter.notifyDataSetChanged()
     }
