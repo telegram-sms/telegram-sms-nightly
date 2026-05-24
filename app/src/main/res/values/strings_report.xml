@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="report_issue">Report issue</string>
+    <string name="report_issue_title">Report Issue</string>
+    <string name="report_issue_confirm">Submit current logs as a GitHub issue?</string>
+    <string name="report_issue_success">Issue reported successfully: %s</string>
+    <string name="report_issue_failed">Failed to report issue: %s</string>
+    <string name="report_issue_no_logs">No logs available to report.</string>
+    <string name="report_issue_submitting">Submitting issue…</string>
+</resources>

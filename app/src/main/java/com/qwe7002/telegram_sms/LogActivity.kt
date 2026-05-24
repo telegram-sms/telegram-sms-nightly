@@ -2,6 +2,7 @@
 
 package com.qwe7002.telegram_sms
 
+import android.app.ProgressDialog
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
@@ -15,6 +16,8 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
+import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -23,6 +26,7 @@ import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
+import com.qwe7002.telegram_sms.static_class.GitHubApi
 import com.qwe7002.telegram_sms.value.Const
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
@@ -121,8 +125,73 @@ class LogActivity : AppCompatActivity() {
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        clearLogcat()
-        return true
+        return when (item.itemId) {
+            R.id.menu_report_issue -> {
+                reportIssue()
+                true
+            }
+            R.id.menu_clear_log -> {
+                clearLogcat()
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun reportIssue() {
+        if (logBuffer.isEmpty()) {
+            Toast.makeText(this, R.string.report_issue_no_logs, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle(R.string.report_issue_title)
+            .setMessage(R.string.report_issue_confirm)
+            .setPositiveButton(R.string.ok_button) { _, _ ->
+                val logContent = logBuffer.joinToString("\n") { entry ->
+                    val base = entry.rawLine
+                    if (entry.hasContinuation()) {
+                        base + "\n" + entry.continuationLines.joinToString("\n")
+                    } else {
+                        base
+                    }
+                }
+
+                val progressDialog = ProgressDialog(this@LogActivity)
+                progressDialog.setProgressStyle(ProgressDialog.STYLE_SPINNER)
+                progressDialog.setTitle(R.string.report_issue_title)
+                progressDialog.setMessage(getString(R.string.report_issue_submitting))
+                progressDialog.isIndeterminate = true
+                progressDialog.setCancelable(false)
+                progressDialog.show()
+
+                GitHubApi.createIssue(
+                    logContent = logContent,
+                    onSuccess = { issueUrl ->
+                        runOnUiThread {
+                            progressDialog.dismiss()
+                            Toast.makeText(
+                                this,
+                                getString(R.string.report_issue_success, issueUrl),
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    },
+                    onFailure = { errorMessage ->
+                        runOnUiThread {
+                            progressDialog.dismiss()
+                            Toast.makeText(
+                                this,
+                                getString(R.string.report_issue_failed, errorMessage),
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                )
+            }
+            .setNegativeButton(R.string.cancel_button, null)
+            .show()
     }
 
     private fun startLogConsumer() {
