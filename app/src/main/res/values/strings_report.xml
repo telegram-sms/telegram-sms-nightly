@@ -7,4 +7,5 @@
     <string name="report_issue_failed">Failed to report issue: %s</string>
     <string name="report_issue_no_logs">No logs available to report.</string>
     <string name="report_issue_submitting">Submitting issue…</string>
+    <string name="report_issue_no_token">GitHub token not configured. Please set it in the configuration.</string>
 </resources>

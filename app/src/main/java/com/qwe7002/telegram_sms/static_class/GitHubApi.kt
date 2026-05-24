@@ -7,6 +7,7 @@ import com.qwe7002.telegram_sms.BuildConfig
 import com.qwe7002.telegram_sms.data_structure.GitHubIssueRequest
 import com.qwe7002.telegram_sms.data_structure.GitHubIssueResponse
 import com.qwe7002.telegram_sms.value.Const
+import com.tencent.mmkv.MMKV
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.Request
@@ -28,6 +29,8 @@ object GitHubApi {
 
     /**
      * Create a GitHub issue with log content and device info.
+     * Requires a GitHub personal access token stored in MMKV default preferences
+     * under the key "github_token".
      *
      * @param logContent The log text to include in the issue body
      * @param onSuccess Callback with the created issue URL
@@ -38,6 +41,13 @@ object GitHubApi {
         onSuccess: (String) -> Unit,
         onFailure: (String) -> Unit
     ) {
+        val preferences = MMKV.defaultMMKV()
+        val githubToken = preferences.getString("github_token", "") ?: ""
+        if (githubToken.isEmpty()) {
+            onFailure("GitHub token not configured")
+            return
+        }
+
         val repoName = getRepoName()
         val deviceInfo = buildDeviceInfo()
         val title = "[Auto Report] ${BuildConfig.VERSION_NAME} - ${Build.MODEL}"
@@ -56,6 +66,7 @@ object GitHubApi {
         val request = Request.Builder()
             .url(requestUri)
             .header("Accept", "application/vnd.github+json")
+            .header("Authorization", "Bearer $githubToken")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .post(requestBody)
             .build()
@@ -67,7 +78,7 @@ object GitHubApi {
             }
 
             override fun onResponse(call: Call, response: Response) {
-                val result = response.body.string()
+                val result = response.body?.string() ?: ""
                 if (response.code == 201) {
                     try {
                         val issueResponse = gson.fromJson(result, GitHubIssueResponse::class.java)

@@ -5,6 +5,7 @@ import com.google.gson.annotations.SerializedName
 data class GitHubIssueRequest(
     val title: String,
     val body: String,
+    // Note: Labels will only be applied if they exist in the target GitHub repository.
     val labels: List<String> = listOf("bug", "auto-report")
 )
 
