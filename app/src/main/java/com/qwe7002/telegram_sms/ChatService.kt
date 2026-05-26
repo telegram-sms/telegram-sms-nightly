@@ -30,6 +30,7 @@ import com.qwe7002.telegram_sms.data_structure.telegram.ReplyMarkupKeyboard.crea
 import com.qwe7002.telegram_sms.data_structure.telegram.RequestMessage
 import com.qwe7002.telegram_sms.static_class.ChatCommand.getCommandList
 import com.qwe7002.telegram_sms.static_class.ChatCommand.getInfo
+import com.qwe7002.telegram_sms.static_class.Network.DOH_SWITCH_DEFAULT
 import com.qwe7002.telegram_sms.static_class.Network.checkNetworkStatus
 import com.qwe7002.telegram_sms.static_class.Network.getOkhttpObj
 import com.qwe7002.telegram_sms.static_class.Network.getUrl
@@ -211,7 +212,7 @@ class ChatService : Service() {
                     val gson = Gson()
                     val requestBodyRaw = gson.toJson(requestBody)
                     val body: RequestBody = requestBodyRaw.toRequestBody(Const.JSON)
-                    val okhttpObj = getOkhttpObj(sharedPreferences.getBoolean("doh_switch", false))
+                    val okhttpObj = getOkhttpObj(sharedPreferences.getBoolean("doh_switch", DOH_SWITCH_DEFAULT))
                     val request: Request =
                         Request.Builder().url(requestUri).method("POST", body).build()
                     val call = okhttpObj.newCall(request)
@@ -238,7 +239,7 @@ class ChatService : Service() {
                     val gson = Gson()
                     val requestBodyRaw = gson.toJson(requestBody)
                     val body: RequestBody = requestBodyRaw.toRequestBody(Const.JSON)
-                    val okhttpObj = getOkhttpObj(sharedPreferences.getBoolean("doh_switch", false))
+                    val okhttpObj = getOkhttpObj(sharedPreferences.getBoolean("doh_switch", DOH_SWITCH_DEFAULT))
                     val request: Request =
                         Request.Builder().url(requestUri).method("POST", body).build()
                     val call = okhttpObj.newCall(request)
@@ -276,7 +277,7 @@ class ChatService : Service() {
                 val requestBodyRaw = gson.toJson(requestBody)
                 val body: RequestBody = requestBodyRaw.toRequestBody(Const.JSON)
                 val okhttpObj = getOkhttpObj(
-                    sharedPreferences.getBoolean("doh_switch", false)
+                    sharedPreferences.getBoolean("doh_switch", DOH_SWITCH_DEFAULT)
                 )
                 val request: Request =
                     Request.Builder().url(requestUri).method("POST", body).build()
@@ -305,7 +306,7 @@ class ChatService : Service() {
             val requestBodyRaw = gson.toJson(requestBody)
             val body: RequestBody = requestBodyRaw.toRequestBody(Const.JSON)
             val okhttpObj = getOkhttpObj(
-                sharedPreferences.getBoolean("doh_switch", false)
+                sharedPreferences.getBoolean("doh_switch", DOH_SWITCH_DEFAULT)
             )
             val request: Request =
                 Request.Builder().url(requestUri).method("POST", body).build()
@@ -352,7 +353,7 @@ class ChatService : Service() {
                     val gson = Gson()
                     val requestBodyRaw = gson.toJson(requestBody)
                     val body: RequestBody = requestBodyRaw.toRequestBody(Const.JSON)
-                    val okhttpObj = getOkhttpObj(sharedPreferences.getBoolean("doh_switch", false))
+                    val okhttpObj = getOkhttpObj(sharedPreferences.getBoolean("doh_switch", DOH_SWITCH_DEFAULT))
                     val request: Request =
                         Request.Builder().url(requestUri).method("POST", body).build()
                     val call = okhttpObj.newCall(request)
@@ -379,7 +380,7 @@ class ChatService : Service() {
                     val gson = Gson()
                     val requestBodyRaw = gson.toJson(requestBody)
                     val body: RequestBody = requestBodyRaw.toRequestBody(Const.JSON)
-                    val okhttpObj = getOkhttpObj(sharedPreferences.getBoolean("doh_switch", false))
+                    val okhttpObj = getOkhttpObj(sharedPreferences.getBoolean("doh_switch", DOH_SWITCH_DEFAULT))
                     val request: Request =
                         Request.Builder().url(requestUri).method("POST", body).build()
                     val call = okhttpObj.newCall(request)
@@ -421,7 +422,7 @@ class ChatService : Service() {
                 val gson = Gson()
                 val requestBodyRaw = gson.toJson(requestBody)
                 val body: RequestBody = requestBodyRaw.toRequestBody(Const.JSON)
-                val okhttpObj = getOkhttpObj(sharedPreferences.getBoolean("doh_switch", false))
+                val okhttpObj = getOkhttpObj(sharedPreferences.getBoolean("doh_switch", DOH_SWITCH_DEFAULT))
                 val request: Request =
                     Request.Builder().url(requestUri).method("POST", body).build()
                 val call = okhttpObj.newCall(request)
@@ -452,7 +453,7 @@ class ChatService : Service() {
             val gson = Gson()
             val requestBodyRaw = gson.toJson(requestBody)
             val body: RequestBody = requestBodyRaw.toRequestBody(Const.JSON)
-            val okhttpObj = getOkhttpObj(sharedPreferences.getBoolean("doh_switch", false))
+            val okhttpObj = getOkhttpObj(sharedPreferences.getBoolean("doh_switch", DOH_SWITCH_DEFAULT))
             val request: Request =
                 Request.Builder().url(requestUri).method("POST", body).build()
             val call = okhttpObj.newCall(request)
@@ -1138,7 +1139,7 @@ class ChatService : Service() {
         botUsername = sharedPreferences.getString("bot_username", "")!!
         messageThreadId = sharedPreferences.getString("message_thread_id", "")!!
         okHttpClient = getOkhttpObj(
-            sharedPreferences.getBoolean("doh_switch", true)
+            sharedPreferences.getBoolean("doh_switch", DOH_SWITCH_DEFAULT)
         )
         pollingHttpClient = okHttpClient.newBuilder()
             .readTimeout(65, TimeUnit.SECONDS)

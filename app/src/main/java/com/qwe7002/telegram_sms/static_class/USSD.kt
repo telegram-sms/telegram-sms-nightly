@@ -60,7 +60,7 @@ object USSD {
         val requestBodyRaw = Gson().toJson(requestBody)
         val body: RequestBody = requestBodyRaw.toRequestBody(Const.JSON)
         val okhttpClient = Network.getOkhttpObj(
-            preferences.getBoolean("doh_switch", true)
+            preferences.getBoolean("doh_switch", Network.DOH_SWITCH_DEFAULT)
         )
         val request: Request = Request.Builder().url(requestUri).method("POST", body).build()
         val call = okhttpClient.newCall(request)

@@ -46,6 +46,7 @@ import com.qwe7002.telegram_sms.data_structure.ScannerJson
 import com.qwe7002.telegram_sms.data_structure.telegram.PollingBody
 import com.qwe7002.telegram_sms.data_structure.telegram.ReplyMarkupKeyboard
 import com.qwe7002.telegram_sms.data_structure.telegram.RequestMessage
+import com.qwe7002.telegram_sms.static_class.Network.DOH_SWITCH_DEFAULT
 import com.qwe7002.telegram_sms.static_class.Network.getOkhttpObj
 import com.qwe7002.telegram_sms.static_class.Network.getUrl
 import com.qwe7002.telegram_sms.static_class.Other.parseStringToLong
@@ -203,7 +204,7 @@ class MainActivity : AppCompatActivity() {
         }
         verificationCodeSwitch.isChecked = preferences.getBoolean("verification_code", false)
 
-        dohSwitch.isChecked = preferences.getBoolean("doh_switch", true)
+        dohSwitch.isChecked = preferences.getBoolean("doh_switch", DOH_SWITCH_DEFAULT)
 
 
         chatIdEditView.addTextChangedListener(object : TextWatcher {
@@ -1139,7 +1140,7 @@ class MainActivity : AppCompatActivity() {
 
         val getMeUri = "https://api.telegram.org/bot$botToken/getMe"
         var okhttpClient = getOkhttpObj(
-            preferences.getBoolean("doh_switch", false)
+            preferences.getBoolean("doh_switch", DOH_SWITCH_DEFAULT)
         )
         okhttpClient = okhttpClient.newBuilder().build()
         val request: Request = Request.Builder().url(getMeUri).get().build()
@@ -1204,7 +1205,7 @@ class MainActivity : AppCompatActivity() {
         progressDialog.show()
         val requestUri = "https://api.telegram.org/bot$chatId/logout"
         var okhttpClient = getOkhttpObj(
-            preferences.getBoolean("doh_switch", false)
+            preferences.getBoolean("doh_switch", DOH_SWITCH_DEFAULT)
         )
         okhttpClient = okhttpClient.newBuilder().build()
         val requestBody = PollingBody()

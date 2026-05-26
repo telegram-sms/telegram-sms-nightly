@@ -135,7 +135,8 @@ class CcSendJob : JobService() {
         val enabledList = sendList.filter { it.enabled }
         if (enabledList.isEmpty()) return
         
-        val okhttpClient = Network.getOkhttpObj(preferences.getBoolean("doh_switch", true))
+        val okhttpClient =
+            Network.getOkhttpObj(preferences.getBoolean("doh_switch", Network.DOH_SWITCH_DEFAULT))
         val mapper = createMapper(title, message, verificationCode, encoded = false)
         val encodeMapper = createMapper(title, message, verificationCode, encoded = true)
         

@@ -310,7 +310,7 @@ class CcActivity : AppCompatActivity() {
                     applicationContext.getSharedPreferences("data", MODE_PRIVATE)*/
                 val preferences = MMKV.defaultMMKV()
                 val okhttpObject = Network.getOkhttpObj(
-                    preferences.getBoolean("doh_switch", true)
+                    preferences.getBoolean("doh_switch", Network.DOH_SWITCH_DEFAULT)
                 )
                 val httpUrlBuilder: HttpUrl.Builder = url.newBuilder()
                 httpUrlBuilder.addQueryParameter("key", id)

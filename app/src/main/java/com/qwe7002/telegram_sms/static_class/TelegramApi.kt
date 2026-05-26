@@ -72,7 +72,7 @@ object TelegramApi {
     ) {
         val preferences = MMKV.defaultMMKV()
         val botToken = preferences.getString("bot_token", "") ?: ""
-        val dohSwitch = preferences.getBoolean("doh_switch", true)
+        val dohSwitch = preferences.getBoolean("doh_switch", Network.DOH_SWITCH_DEFAULT)
 
         // Auto-fill chatId and messageThreadId from preferences if not initialized
         try {
@@ -138,7 +138,7 @@ object TelegramApi {
     ): String? {
         val preferences = MMKV.defaultMMKV()
         val botToken = preferences.getString("bot_token", "") ?: ""
-        val dohSwitch = preferences.getBoolean("doh_switch", true)
+        val dohSwitch = preferences.getBoolean("doh_switch", Network.DOH_SWITCH_DEFAULT)
 
         // Auto-fill chatId and messageThreadId from preferences if not initialized
         try {
@@ -205,7 +205,7 @@ object TelegramApi {
         val botToken = preferences.getString("bot_token", "") ?: ""
         val chatId = preferences.getString("chat_id", "") ?: ""
         val messageThreadId = preferences.getString("message_thread_id", "") ?: ""
-        val dohSwitch = preferences.getBoolean("doh_switch", true)
+        val dohSwitch = preferences.getBoolean("doh_switch", Network.DOH_SWITCH_DEFAULT)
 
         val method = when (mediaType.lowercase()) {
             "photo" -> "sendPhoto"
