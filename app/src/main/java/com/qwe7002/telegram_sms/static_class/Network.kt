@@ -4,8 +4,6 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
-import android.os.StrictMode
-import android.os.StrictMode.ThreadPolicy
 import android.util.Log
 import com.qwe7002.telegram_sms.MMKV.MMKVConst
 import com.qwe7002.telegram_sms.value.Const
@@ -108,9 +106,10 @@ object Network {
         val okhttp = baseClient.newBuilder()
 
         if (key.proxyEnabled) {
-            val policy = ThreadPolicy.Builder().permitAll().build()
-            StrictMode.setThreadPolicy(policy)
-            val proxyAddr = InetSocketAddress(key.proxyHost, key.proxyPort)
+            // Leave the proxy endpoint unresolved so the JDK SOCKS layer resolves it
+            // lazily on the I/O thread at connect time, rather than triggering an
+            // eager (possibly main-thread) system DNS lookup here while building.
+            val proxyAddr = InetSocketAddress.createUnresolved(key.proxyHost, key.proxyPort)
             val proxy = Proxy(Proxy.Type.SOCKS, proxyAddr)
             installProxyAuthenticator()
             okhttp.proxy(proxy)
