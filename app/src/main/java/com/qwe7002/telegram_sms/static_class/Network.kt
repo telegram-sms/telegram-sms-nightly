@@ -19,6 +19,7 @@ import java.net.InetSocketAddress
 import java.net.PasswordAuthentication
 import java.net.Proxy
 import java.net.UnknownHostException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 object Network {
@@ -47,6 +48,19 @@ object Network {
     // java.net.Authenticator.setDefault is a process-wide global; install it once.
     @Volatile
     private var proxyAuthenticatorInstalled = false
+
+    private data class ClientKey(
+        val dohEnabled: Boolean,
+        val proxyEnabled: Boolean,
+        val proxyHost: String,
+        val proxyPort: Int
+    )
+
+    // One client per distinct config. OkHttp keys connection reuse on the Dns
+    // identity, so handing out a fresh client (and a fresh DnsOverHttps) per
+    // request would defeat keep-alive and force a new DoH lookup + TLS handshake
+    // every time. Caching keeps the Dns/pool stable -> warm connections are reused.
+    private val clientCache = ConcurrentHashMap<ClientKey, OkHttpClient>()
 
     @Suppress("DEPRECATION")
     @JvmStatic
@@ -77,26 +91,32 @@ object Network {
     @JvmStatic
     fun getOkhttpObj(dohSwitch: Boolean): OkHttpClient {
         val proxyMMKV = MMKV.mmkvWithID(MMKVConst.PROXY_ID)
+        val proxyEnabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
+            proxyMMKV.getBoolean("enable", false)
+        val proxyHost = if (proxyEnabled) proxyMMKV.getString("host", "") ?: "" else ""
+        val proxyPort = if (proxyEnabled) proxyMMKV.getInt("port", 0) else 0
+        return clientCache.computeIfAbsent(
+            ClientKey(dohSwitch, proxyEnabled, proxyHost, proxyPort)
+        ) { key ->
+            buildClient(key)
+        }
+    }
+
+    private fun buildClient(key: ClientKey): OkHttpClient {
         // Derive from the shared base client so the connection pool and dispatcher
         // thread pools are reused instead of allocated per request.
         val okhttp = baseClient.newBuilder()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && proxyMMKV.getBoolean(
-                "enable",
-                false
-            )
-        ) {
+        if (key.proxyEnabled) {
             val policy = ThreadPolicy.Builder().permitAll().build()
             StrictMode.setThreadPolicy(policy)
-            val host = proxyMMKV.getString("host", "")
-            val port = proxyMMKV.getInt("port", 0)
-            val proxyAddr = InetSocketAddress(host, port)
+            val proxyAddr = InetSocketAddress(key.proxyHost, key.proxyPort)
             val proxy = Proxy(Proxy.Type.SOCKS, proxyAddr)
             installProxyAuthenticator()
             okhttp.proxy(proxy)
         }
 
-        if (dohSwitch) {
+        if (key.dohEnabled) {
             // The DoH resolver must travel the same path (incl. SOCKS5 proxy) as the
             // main client, otherwise DNS leaks the proxy and fails on proxy-only
             // networks. It carries no `dns()` of its own and only ever connects to
