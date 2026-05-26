@@ -38,7 +38,7 @@ class USSDCallBack(
     init {
         val preferences = MMKV.defaultMMKV()
         val chatId = preferences.getString("chat_id", "")
-        this.dohSwitch = preferences.getBoolean("doh_switch", true)
+        this.dohSwitch = preferences.getBoolean("doh_switch", Network.DOH_SWITCH_DEFAULT)
         this.requestBody = RequestMessage()
         requestBody.chatId = chatId.toString()
         requestBody.messageThreadId =

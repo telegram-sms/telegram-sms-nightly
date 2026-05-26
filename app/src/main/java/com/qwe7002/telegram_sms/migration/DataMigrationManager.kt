@@ -3,6 +3,7 @@ package com.qwe7002.telegram_sms.migration
 import android.content.Context
 import android.util.Log
 import com.qwe7002.telegram_sms.MMKV.MMKVConst
+import com.qwe7002.telegram_sms.static_class.Network
 import com.tencent.mmkv.MMKV
 
 /**
@@ -143,7 +144,7 @@ object DataMigrationManager {
     private fun validateVersion1Data(preferences: MMKV) {
         // Ensure critical fields have valid defaults
         if (!preferences.contains("doh_switch")) {
-            preferences.putBoolean("doh_switch", true)
+            preferences.putBoolean("doh_switch", Network.DOH_SWITCH_DEFAULT)
         }
 
         if (!preferences.contains("api_address")) {

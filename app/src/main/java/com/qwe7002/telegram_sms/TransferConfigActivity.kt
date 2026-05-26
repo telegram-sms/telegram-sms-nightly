@@ -58,7 +58,7 @@ class TransferConfigActivity : AppCompatActivity() {
         FakeStatusBar().fakeStatusBar(this, window)
         preferences = MMKV.defaultMMKV()
         okhttpObject = Network.getOkhttpObj(
-            preferences.getBoolean("doh_switch", true)
+            preferences.getBoolean("doh_switch", Network.DOH_SWITCH_DEFAULT)
         )
         if (preferences.getBoolean("initialized", false)) {
             val qrCodeImageview = findViewById<ImageView>(R.id.qr_imageview)
