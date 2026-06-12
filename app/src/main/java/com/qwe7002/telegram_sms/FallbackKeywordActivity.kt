@@ -8,6 +8,7 @@ import android.widget.AdapterView.OnItemClickListener
 import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.ListView
+import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
@@ -32,6 +33,13 @@ class FallbackKeywordActivity : AppCompatActivity() {
         }
         FakeStatusBar().fakeStatusBar(this, window)
         val preferences = MMKV.defaultMMKV()
+        // Warn the user when the keyword list is inert: fallback forwarding only runs
+        // when a trusted number is set and the fallback switch is on (see SMS.fallbackSMS).
+        val inactiveHint = findViewById<TextView>(R.id.fallback_keyword_inactive_hint)
+        val trustedNumber = preferences.getString("trusted_phone_number", "")
+        val fallbackEnabled = preferences.getBoolean("fallback_sms", false)
+        inactiveHint.visibility =
+            if (trustedNumber.isNullOrEmpty() || !fallbackEnabled) View.VISIBLE else View.GONE
         val whitelistSwitch =
             findViewById<SwitchMaterial>(R.id.fallback_keyword_whitelist_switch)
         whitelistSwitch.isChecked = preferences.getBoolean("fallback_keyword_whitelist", true)
