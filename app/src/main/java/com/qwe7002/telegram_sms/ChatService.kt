@@ -188,6 +188,12 @@ class ChatService : Service() {
             if (callbackQuery.has("message")) {
                 callbackMessageId = callbackQuery["message"].asJsonObject["message_id"].asLong
             }
+            // Acknowledge the button press right away so Telegram dismisses the inline
+            // button's loading indicator instead of showing a long-running spinner while
+            // the rest of the flow (network requests + SMS dispatch) is processed.
+            if (callbackQuery.has("id")) {
+                answerCallbackQuery(callbackQuery["id"].asString)
+            }
         }
 
         // Handle SMS management callbacks
@@ -292,35 +298,12 @@ class ChatService : Service() {
                 }
                 return
             }
-            // First reply to user with "Sending" status before executing send operation
+            // Reset the interactive state immediately and offload the actual send to a
+            // background thread. The blocking network request + SMS dispatch used to run
+            // on the polling thread, which delayed both the user feedback and further
+            // polling. send() already updates the message to the "Sending" status, so a
+            // separate "Sending" edit here would only add a redundant round-trip.
             setSmsSendStatusStandby()
-            val requestUri = getUrl(botToken, "editMessageText")
-            val dualSim = Phone.getSimDisplayName(applicationContext, slot)
-            requestBody.text = Template.render(
-                applicationContext,
-                "TPL_send_sms",
-                mapOf("SIM" to dualSim, "To" to to, "Content" to content)
-            ) + "\n" + getString(R.string.status) + getString(R.string.sending)
-            requestBody.messageId = messageId
-            val gson = Gson()
-            val requestBodyRaw = gson.toJson(requestBody)
-            val body: RequestBody = requestBodyRaw.toRequestBody(Const.JSON)
-            val okhttpObj = getOkhttpObj(
-                sharedPreferences.getBoolean("doh_switch", DOH_SWITCH_DEFAULT)
-            )
-            val request: Request =
-                Request.Builder().url(requestUri).method("POST", body).build()
-            val call = okhttpObj.newCall(request)
-            try {
-                val response = call.execute()
-                if (response.code != 200) {
-                    throw IOException(response.code.toString())
-                }
-            } catch (e: IOException) {
-                Log.e(Const.TAG, "Failed to edit message: ${e.message}", e)
-            }
-
-            // Now execute the send operation
             var subId = -1
             if (getActiveCard(applicationContext) == 1) {
                 slot = -1
@@ -332,7 +315,11 @@ class ChatService : Service() {
                     Manifest.permission.SEND_SMS
                 ) == PackageManager.PERMISSION_GRANTED
             ) {
-                send(applicationContext, to, content, slot, subId, messageId)
+                val sendSlot = slot
+                val sendSubId = subId
+                Thread {
+                    send(applicationContext, to, content, sendSlot, sendSubId, messageId)
+                }.start()
             }
             return
         }
@@ -1348,6 +1335,22 @@ ${getString(R.string.sms_date)} ${sms.getFormattedDate()}
 ${getString(R.string.sms_content)}
 ${sms.body}
         """.trimIndent()
+    }
+
+    private fun answerCallbackQuery(callbackQueryId: String) {
+        val requestUri = getUrl(botToken, "answerCallbackQuery")
+        val payload = Gson().toJson(mapOf("callback_query_id" to callbackQueryId))
+        val body: RequestBody = payload.toRequestBody(Const.JSON)
+        val request: Request = Request.Builder().url(requestUri).method("POST", body).build()
+        okHttpClient.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                Log.e(Const.TAG, "Failed to answer callback query: ${e.message}", e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.close()
+            }
+        })
     }
 
     private fun editMessage(messageId: Long, requestBody: RequestMessage) {
