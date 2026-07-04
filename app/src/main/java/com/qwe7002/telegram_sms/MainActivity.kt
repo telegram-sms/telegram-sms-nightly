@@ -523,7 +523,25 @@ class MainActivity : AppCompatActivity() {
                     }
                     MMKV.mmkvWithID(MMKVConst.RESEND_ID).clearAll()
                     checkVersionUpgrade()
+                    // Preserve user-configured data that lives in the default MMKV but is
+                    // not represented by this form, otherwise "Test and Save" would wipe it
+                    // when it clears the whole store (issue #86).
+                    val blockKeywordList = preferences.getStringSet("block_keyword_list", null)
+                    val fallbackKeywordList = preferences.getStringSet("fallback_keyword_list", null)
+                    val fallbackKeywordWhitelist =
+                        preferences.getBoolean("fallback_keyword_whitelist", true)
                     preferences.clearAll()
+                    // Restore the preserved user data after the reset.
+                    if (blockKeywordList != null) {
+                        preferences.encode("block_keyword_list", blockKeywordList)
+                    }
+                    if (fallbackKeywordList != null) {
+                        preferences.encode("fallback_keyword_list", fallbackKeywordList)
+                    }
+                    preferences.putBoolean(
+                        "fallback_keyword_whitelist",
+                        fallbackKeywordWhitelist
+                    )
                     preferences.putString("bot_token", newBotToken)
                     preferences.putString(
                         "chat_id",
