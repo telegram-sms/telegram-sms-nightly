@@ -43,6 +43,24 @@ data class SmsInfo(
     }
 }
 
+/**
+ * A conversation (thread) summary grouped by [threadId].
+ * [snippet] and [date] come from the latest message in the thread and
+ * [count] is the total number of messages exchanged with [address].
+ */
+data class SmsConversation(
+    val threadId: Long,
+    val address: String,
+    val snippet: String,
+    val date: Long,
+    val count: Int
+) {
+    fun getFormattedDate(): String {
+        val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
+        return sdf.format(Date(date))
+    }
+}
+
 object SMS {
 
     @JvmStatic
@@ -139,6 +157,109 @@ object SMS {
             Log.e(Const.TAG, "Failed to delete SMS: ${e.message}", e)
             false
         }
+    }
+
+    /**
+     * Group all SMS into conversations keyed by thread_id, ordered by the most
+     * recent activity. Each entry carries the latest message preview and the
+     * total message count with that address. Returns the requested page and the
+     * total number of pages.
+     */
+    @JvmStatic
+    @SuppressLint("Range")
+    @RequiresPermission(Manifest.permission.READ_SMS)
+    fun getConversations(
+        context: Context,
+        page: Int = 0,
+        pageSize: Int = 5
+    ): Pair<List<SmsConversation>, Int> {
+        // Preserve most-recent-first order while accumulating per-thread counts.
+        val latestByThread = LinkedHashMap<Long, SmsConversation>()
+        val countByThread = HashMap<Long, Int>()
+
+        val cursor = context.contentResolver.query(
+            "content://sms".toUri(),
+            arrayOf("_id", "thread_id", "address", "body", "date"),
+            null,
+            null,
+            "date DESC"
+        )
+        cursor?.use {
+            val idxThread = it.getColumnIndex("thread_id")
+            val idxAddress = it.getColumnIndex("address")
+            val idxBody = it.getColumnIndex("body")
+            val idxDate = it.getColumnIndex("date")
+            while (it.moveToNext()) {
+                val threadId = it.getLong(idxThread)
+                countByThread[threadId] = (countByThread[threadId] ?: 0) + 1
+                if (!latestByThread.containsKey(threadId)) {
+                    latestByThread[threadId] = SmsConversation(
+                        threadId = threadId,
+                        address = it.getString(idxAddress) ?: "",
+                        snippet = it.getString(idxBody) ?: "",
+                        date = it.getLong(idxDate),
+                        count = 0
+                    )
+                }
+            }
+        }
+
+        val conversations = latestByThread.values.map {
+            it.copy(count = countByThread[it.threadId] ?: 1)
+        }
+        val totalCount = conversations.size
+        val totalPages = (totalCount + pageSize - 1) / pageSize
+        val startPos = page * pageSize
+        val pageItems = if (startPos < totalCount) {
+            conversations.subList(startPos, minOf(startPos + pageSize, totalCount)).toList()
+        } else {
+            emptyList()
+        }
+        return Pair(pageItems, totalPages)
+    }
+
+    /**
+     * Return a page of the messages belonging to [threadId] (newest first) and
+     * the total number of pages for that conversation.
+     */
+    @JvmStatic
+    @SuppressLint("Range")
+    @RequiresPermission(Manifest.permission.READ_SMS)
+    fun getSmsByThread(
+        context: Context,
+        threadId: Long,
+        page: Int = 0,
+        pageSize: Int = 5
+    ): Pair<List<SmsInfo>, Int> {
+        val smsList = mutableListOf<SmsInfo>()
+        val cursor = context.contentResolver.query(
+            "content://sms".toUri(),
+            arrayOf("_id", "address", "body", "date", "type"),
+            "thread_id = ?",
+            arrayOf(threadId.toString()),
+            "date DESC"
+        )
+
+        var totalCount = 0
+        cursor?.use {
+            totalCount = it.count
+            val startPos = page * pageSize
+            if (startPos < totalCount && it.moveToPosition(startPos)) {
+                var count = 0
+                do {
+                    val id = it.getLong(it.getColumnIndex("_id"))
+                    val address = it.getString(it.getColumnIndex("address")) ?: ""
+                    val body = it.getString(it.getColumnIndex("body")) ?: ""
+                    val date = it.getLong(it.getColumnIndex("date"))
+                    val smsType = it.getInt(it.getColumnIndex("type"))
+                    smsList.add(SmsInfo(id, address, body, date, smsType))
+                    count++
+                } while (count < pageSize && it.moveToNext())
+            }
+        }
+
+        val totalPages = (totalCount + pageSize - 1) / pageSize
+        return Pair(smsList, totalPages)
     }
 
     @JvmStatic

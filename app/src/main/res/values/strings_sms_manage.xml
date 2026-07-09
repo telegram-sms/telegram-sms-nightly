@@ -17,4 +17,7 @@
     <string name="not_default_sms_app">This feature requires the app to be set as the default SMS app.</string>
     <string name="prev_page">Previous</string>
     <string name="next_page">Next</string>
+    <string name="sms_conversation_header">📱 SMS Conversations</string>
+    <string name="sms_thread_header">💬 Conversation with %1$s</string>
+    <string name="sms_thread_reply_hint">↩️ Reply to this message to send an SMS to %1$s.</string>
 </resources>

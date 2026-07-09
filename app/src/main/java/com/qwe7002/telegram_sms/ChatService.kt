@@ -24,9 +24,9 @@ import com.qwe7002.telegram_sms.data_structure.SMSRequestInfo
 import com.qwe7002.telegram_sms.data_structure.telegram.PollingBody
 import com.qwe7002.telegram_sms.data_structure.telegram.ReplyMarkupKeyboard.KeyboardMarkup
 import com.qwe7002.telegram_sms.data_structure.telegram.ReplyMarkupKeyboard.getInlineKeyboardObj
-import com.qwe7002.telegram_sms.data_structure.telegram.ReplyMarkupKeyboard.createSmsListKeyboard
-import com.qwe7002.telegram_sms.data_structure.telegram.ReplyMarkupKeyboard.createSmsDetailKeyboard
-import com.qwe7002.telegram_sms.data_structure.telegram.ReplyMarkupKeyboard.createDeleteConfirmKeyboard
+import com.qwe7002.telegram_sms.data_structure.telegram.ReplyMarkupKeyboard.createConversationListKeyboard
+import com.qwe7002.telegram_sms.data_structure.telegram.ReplyMarkupKeyboard.createThreadKeyboard
+import com.qwe7002.telegram_sms.data_structure.telegram.ReplyMarkupKeyboard.createThreadDeleteConfirmKeyboard
 import com.qwe7002.telegram_sms.data_structure.telegram.RequestMessage
 import com.qwe7002.telegram_sms.static_class.ChatCommand.getCommandList
 import com.qwe7002.telegram_sms.static_class.ChatCommand.getInfo
@@ -37,6 +37,7 @@ import com.qwe7002.telegram_sms.static_class.Network.getUrl
 import com.qwe7002.telegram_sms.static_class.Other.getActiveCard
 import com.qwe7002.telegram_sms.static_class.Other.getMessageId
 import com.qwe7002.telegram_sms.static_class.Other.getNotificationObj
+import com.qwe7002.telegram_sms.static_class.Other.addMessageList
 import com.qwe7002.telegram_sms.static_class.Other.getSendPhoneNumber
 import com.qwe7002.telegram_sms.static_class.Other.getSubId
 import com.qwe7002.telegram_sms.static_class.Other.isPhoneNumber
@@ -44,6 +45,7 @@ import com.qwe7002.telegram_sms.static_class.Phone
 import com.qwe7002.telegram_sms.static_class.Resend.addResendLoop
 import com.qwe7002.telegram_sms.static_class.SMS
 import com.qwe7002.telegram_sms.static_class.SMS.send
+import com.qwe7002.telegram_sms.static_class.SmsConversation
 import com.qwe7002.telegram_sms.static_class.SmsInfo
 import com.qwe7002.telegram_sms.static_class.Template
 import com.qwe7002.telegram_sms.static_class.USSD.sendUssd
@@ -704,36 +706,23 @@ class ChatService : Service() {
                         mapOf("Message" to getString(R.string.not_default_sms_app))
                     )
                     hasCommand = true
-                } else if (ActivityCompat.checkSelfPermission(
-                        applicationContext,
-                        Manifest.permission.READ_SMS
-                    ) == PackageManager.PERMISSION_GRANTED
-                ) {
-                    val commandList = requestMsg.split(" ").filter { it.isNotEmpty() }
-                    val smsType = if (commandList.size >= 2) commandList[1].lowercase() else "all"
-                    val (smsList, totalPages) = SMS.getSmsList(applicationContext, smsType, 0, 5)
+                } else if (hasReadSmsPermission()) {
+                    val (conversations, totalPages) = SMS.getConversations(applicationContext, 0, 5)
 
-                    if (smsList.isEmpty()) {
+                    if (conversations.isEmpty()) {
                         requestBody.text = Template.render(
                             applicationContext, "TPL_system_message",
                             mapOf("Message" to getString(R.string.sms_list_empty))
                         )
                     } else {
-                        val typeLabel = when (smsType) {
-                            "inbox" -> getString(R.string.sms_type_inbox)
-                            "sent" -> getString(R.string.sms_type_sent)
-                            else -> getString(R.string.sms_type_all)
-                        }
-                        requestBody.text = buildSmsListMessage(smsList, typeLabel)
-                        val keyboardMarkup = KeyboardMarkup().apply {
-                            inlineKeyboard = createSmsListKeyboard(
-                                smsList.map { it.id },
+                        requestBody.text = buildConversationListMessage(conversations)
+                        requestBody.replyMarkup = KeyboardMarkup().apply {
+                            inlineKeyboard = createConversationListKeyboard(
+                                conversations.map { Triple(it.threadId, it.address, it.count) },
                                 0,
-                                totalPages,
-                                smsType
+                                totalPages
                             )
                         }
-                        requestBody.replyMarkup = keyboardMarkup
                     }
                     hasCommand = true
                 }
@@ -1191,150 +1180,142 @@ class ChatService : Service() {
         val parts = callbackData.split(":")
 
         when {
-            // Handle pagination: sms_page:type:pageNum
-            callbackData.startsWith("sms_page:") && parts.size >= 3 -> {
-                val smsType = parts[1]
-                val pageStr = parts[2]
-                if (pageStr == "current") return // Ignore current page button click
-
-                val page = pageStr.toIntOrNull() ?: 0
-                if (ActivityCompat.checkSelfPermission(
-                        applicationContext,
-                        Manifest.permission.READ_SMS
-                    ) == PackageManager.PERMISSION_GRANTED
-                ) {
-                    val (smsList, totalPages) = SMS.getSmsList(applicationContext, smsType, page, 5)
-                    val typeLabel = when (smsType) {
-                        "inbox" -> getString(R.string.sms_type_inbox)
-                        "sent" -> getString(R.string.sms_type_sent)
-                        else -> getString(R.string.sms_type_all)
-                    }
-                    requestBody.text = buildSmsListMessage(smsList, typeLabel)
-                    val keyboardMarkup = KeyboardMarkup().apply {
-                        inlineKeyboard =
-                            createSmsListKeyboard(smsList.map { it.id }, page, totalPages, smsType)
-                    }
-                    requestBody.replyMarkup = keyboardMarkup
-                    editMessage(messageId, requestBody)
+            // Conversation list pagination: sms_conv:page
+            callbackData.startsWith("sms_conv:") && parts.size >= 2 -> {
+                if (parts[1] == "current") return // Ignore current page indicator
+                val page = parts[1].toIntOrNull() ?: 0
+                if (hasReadSmsPermission()) {
+                    showConversationList(messageId, requestBody, page)
                 }
             }
 
-            // Handle read SMS: sms_read:id
-            callbackData.startsWith("sms_read:") && parts.size >= 2 -> {
-                val smsId = parts[1].toLongOrNull()
-                if (smsId != null && ActivityCompat.checkSelfPermission(
-                        applicationContext,
-                        Manifest.permission.READ_SMS
-                    ) == PackageManager.PERMISSION_GRANTED
-                ) {
-                    val sms = SMS.getSmsById(applicationContext, smsId)
-                    if (sms != null) {
-                        requestBody.text = buildSmsDetailMessage(sms)
-                        val keyboardMarkup = KeyboardMarkup().apply {
-                            inlineKeyboard = createSmsDetailKeyboard(smsId)
-                        }
-                        requestBody.replyMarkup = keyboardMarkup
-                    } else {
-                        requestBody.text = Template.render(
-                            applicationContext, "TPL_system_message",
-                            mapOf("Message" to getString(R.string.sms_not_found))
-                        )
-                    }
-                    editMessage(messageId, requestBody)
+            // Thread (conversation detail) view: sms_thread:threadId:page
+            callbackData.startsWith("sms_thread:") && parts.size >= 3 -> {
+                if (parts[2] == "current") return // Ignore current page indicator
+                val threadId = parts[1].toLongOrNull()
+                val page = parts[2].toIntOrNull() ?: 0
+                if (threadId != null && hasReadSmsPermission()) {
+                    showThread(messageId, requestBody, threadId, page)
                 }
             }
 
-            // Handle delete confirmation prompt: sms_del_confirm:id
-            callbackData.startsWith("sms_del_confirm:") && parts.size >= 2 -> {
+            // Delete confirmation inside a thread: sms_tdel_confirm:id:threadId
+            callbackData.startsWith("sms_tdel_confirm:") && parts.size >= 3 -> {
                 val smsId = parts[1].toLongOrNull()
-                if (smsId != null) {
+                val threadId = parts[2].toLongOrNull()
+                if (smsId != null && threadId != null) {
                     requestBody.text = Template.render(
                         applicationContext, "TPL_system_message",
                         mapOf("Message" to getString(R.string.sms_delete_confirm) + "\n\nID: $smsId")
                     )
-                    val keyboardMarkup = KeyboardMarkup().apply {
-                        inlineKeyboard = createDeleteConfirmKeyboard(smsId)
+                    requestBody.replyMarkup = KeyboardMarkup().apply {
+                        inlineKeyboard = createThreadDeleteConfirmKeyboard(smsId, threadId)
                     }
-                    requestBody.replyMarkup = keyboardMarkup
                     editMessage(messageId, requestBody)
                 }
             }
 
-            // Handle actual delete: sms_del:id
-            callbackData.startsWith("sms_del:") && parts.size >= 2 -> {
+            // Delete a message and return to the thread: sms_tdel:id:threadId
+            callbackData.startsWith("sms_tdel:") && parts.size >= 3 -> {
                 val smsId = parts[1].toLongOrNull()
-                if (smsId != null) {
-                    val success = SMS.deleteSmsById(applicationContext, smsId)
-                    val message = if (success) {
-                        getString(R.string.sms_deleted)
-                    } else {
-                        getString(R.string.sms_delete_failed)
-                    }
-                    requestBody.text = Template.render(
-                        applicationContext, "TPL_system_message",
-                        mapOf("Message" to message)
-                    )
-                    // Return to list
-                    if (ActivityCompat.checkSelfPermission(
-                            applicationContext,
-                            Manifest.permission.READ_SMS
-                        ) == PackageManager.PERMISSION_GRANTED
-                    ) {
-                        val (smsList, totalPages) = SMS.getSmsList(applicationContext, "all", 0, 5)
-                        if (smsList.isNotEmpty()) {
-                            requestBody.text = buildSmsListMessage(
-                                smsList, getString(R.string.sms_type_all)
-                            )
-                            val keyboardMarkup = KeyboardMarkup().apply {
-                                inlineKeyboard = createSmsListKeyboard(
-                                    smsList.map { it.id },
-                                    0,
-                                    totalPages,
-                                    "all"
-                                )
-                            }
-                            requestBody.replyMarkup = keyboardMarkup
+                val threadId = parts[2].toLongOrNull()
+                if (smsId != null && threadId != null) {
+                    SMS.deleteSmsById(applicationContext, smsId)
+                    if (hasReadSmsPermission()) {
+                        val (smsList, _) = SMS.getSmsByThread(applicationContext, threadId, 0, 5)
+                        if (smsList.isEmpty()) {
+                            // Whole conversation is gone, fall back to the list.
+                            showConversationList(messageId, requestBody, 0)
+                        } else {
+                            showThread(messageId, requestBody, threadId, 0)
                         }
                     }
-                    editMessage(messageId, requestBody)
                 }
             }
         }
     }
 
-    private fun buildSmsListMessage(smsList: List<SmsInfo>, typeLabel: String): String {
-        val header = String.format(getString(R.string.sms_list_header), typeLabel)
-        val builder = StringBuilder()
-        builder.append(header).append("\n")
-        builder.append("━━━━━━━━━━━━━━━\n")
+    /**
+     * True if the app currently holds READ_SMS. Convenience wrapper used across
+     * the SMS management callbacks.
+     */
+    private fun hasReadSmsPermission(): Boolean =
+        ActivityCompat.checkSelfPermission(
+            applicationContext,
+            Manifest.permission.READ_SMS
+        ) == PackageManager.PERMISSION_GRANTED
 
-        for (sms in smsList) {
-            val typeIcon = if (sms.type == 1) "📥" else "📤"
-            val preview = if (sms.body.length > 30) sms.body.take(30) + "..." else sms.body
-            builder.append("$typeIcon #${sms.id}\n")
-            builder.append("📞 ${sms.address}\n")
-            builder.append("💬 $preview\n")
-            builder.append("🕐 ${sms.getFormattedDate()}\n")
+    @SuppressLint("MissingPermission")
+    private fun showConversationList(messageId: Long, requestBody: RequestMessage, page: Int) {
+        val (conversations, totalPages) = SMS.getConversations(applicationContext, page, 5)
+        if (conversations.isEmpty()) {
+            requestBody.text = Template.render(
+                applicationContext, "TPL_system_message",
+                mapOf("Message" to getString(R.string.sms_list_empty))
+            )
+        } else {
+            requestBody.text = buildConversationListMessage(conversations)
+            requestBody.replyMarkup = KeyboardMarkup().apply {
+                inlineKeyboard = createConversationListKeyboard(
+                    conversations.map { Triple(it.threadId, it.address, it.count) },
+                    page,
+                    totalPages
+                )
+            }
+        }
+        editMessage(messageId, requestBody)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun showThread(messageId: Long, requestBody: RequestMessage, threadId: Long, page: Int) {
+        val (smsList, totalPages) = SMS.getSmsByThread(applicationContext, threadId, page, 5)
+        if (smsList.isEmpty()) {
+            requestBody.text = Template.render(
+                applicationContext, "TPL_system_message",
+                mapOf("Message" to getString(R.string.sms_not_found))
+            )
+            editMessage(messageId, requestBody)
+            return
+        }
+        val address = smsList.first().address
+        requestBody.text = buildThreadMessage(address, smsList)
+        requestBody.replyMarkup = KeyboardMarkup().apply {
+            inlineKeyboard = createThreadKeyboard(threadId, smsList.map { it.id }, page, totalPages)
+        }
+        // Wire this message into the existing "reply to a forwarded SMS" flow so
+        // that replying to it in Telegram composes an SMS back to this contact.
+        addMessageList(messageId, address, -1)
+        editMessage(messageId, requestBody)
+    }
+
+    private fun buildConversationListMessage(conversations: List<SmsConversation>): String {
+        val builder = StringBuilder()
+        builder.append(getString(R.string.sms_conversation_header)).append("\n")
+        builder.append("━━━━━━━━━━━━━━━\n")
+        for (c in conversations) {
+            val preview = if (c.snippet.length > 30) c.snippet.take(30) + "…" else c.snippet
+            builder.append("💬 ${c.address.ifEmpty { "?" }}  (${c.count})\n")
+            builder.append("   $preview\n")
+            builder.append("   🕐 ${c.getFormattedDate()}\n")
             builder.append("───────────────\n")
         }
-
         return builder.toString()
     }
 
-    private fun buildSmsDetailMessage(sms: SmsInfo): String {
-        val typeIcon = if (sms.type == 1) "📥" else "📤"
-        val addressLabel =
-            if (sms.type == 1) getString(R.string.sms_from) else getString(R.string.sms_to)
-
-        return """
-${getString(R.string.sms_detail_header)} $typeIcon #${sms.id}
-━━━━━━━━━━━━━━━
-$addressLabel ${sms.address}
-${getString(R.string.sms_date)} ${sms.getFormattedDate()}
-━━━━━━━━━━━━━━━
-${getString(R.string.sms_content)}
-${sms.body}
-        """.trimIndent()
+    private fun buildThreadMessage(address: String, smsList: List<SmsInfo>): String {
+        val builder = StringBuilder()
+        builder.append(String.format(getString(R.string.sms_thread_header), address.ifEmpty { "?" }))
+            .append("\n")
+        builder.append("━━━━━━━━━━━━━━━\n")
+        for (sms in smsList) {
+            val typeIcon = if (sms.type == 1) "📥" else "📤"
+            builder.append("$typeIcon #${sms.id}  🕐 ${sms.getFormattedDate()}\n")
+            builder.append("${sms.body}\n")
+            builder.append("───────────────\n")
+        }
+        builder.append("\n")
+            .append(String.format(getString(R.string.sms_thread_reply_hint), address.ifEmpty { "?" }))
+        return builder.toString()
     }
 
     private fun answerCallbackQuery(callbackQueryId: String) {

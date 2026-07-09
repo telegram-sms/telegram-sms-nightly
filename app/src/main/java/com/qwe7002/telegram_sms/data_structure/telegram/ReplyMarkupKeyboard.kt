@@ -55,28 +55,30 @@ object ReplyMarkupKeyboard {
         return keyboard
     }
 
+    /**
+     * Conversation list: one button per conversation (opens the thread) plus a
+     * pagination row. [conversations] is a list of (threadId, address, count).
+     */
     @JvmStatic
-    fun createSmsListKeyboard(
-        smsIds: List<Long>,
+    fun createConversationListKeyboard(
+        conversations: List<Triple<Long, String, Int>>,
         currentPage: Int,
-        totalPages: Int,
-        type: String
+        totalPages: Int
     ): ArrayList<ArrayList<InlineKeyboardButton>> {
         val keyboard = ArrayList<ArrayList<InlineKeyboardButton>>()
 
-        // Add SMS item buttons (each SMS as a row)
-        for (id in smsIds) {
-            keyboard.add(getInlineKeyboardObj("📖 #$id", "sms_read:$id"))
+        for ((threadId, address, count) in conversations) {
+            val label = "💬 ${address.ifEmpty { "?" }} ($count)"
+            keyboard.add(getInlineKeyboardObj(label, "sms_thread:$threadId:0"))
         }
 
-        // Add pagination row
         val navRow = ArrayList<InlineKeyboardButton>()
         if (currentPage > 0) {
-            navRow.add(createButton("◀️", "sms_page:$type:${currentPage - 1}"))
+            navRow.add(createButton("◀️", "sms_conv:${currentPage - 1}"))
         }
-        navRow.add(createButton("${currentPage + 1}/$totalPages", "sms_page:$type:current"))
+        navRow.add(createButton("${currentPage + 1}/$totalPages", "sms_conv:current"))
         if (currentPage < totalPages - 1) {
-            navRow.add(createButton("▶️", "sms_page:$type:${currentPage + 1}"))
+            navRow.add(createButton("▶️", "sms_conv:${currentPage + 1}"))
         }
         if (navRow.isNotEmpty()) {
             keyboard.add(navRow)
@@ -85,20 +87,61 @@ object ReplyMarkupKeyboard {
         return keyboard
     }
 
+    /**
+     * Thread (conversation detail) view: a delete button per message on the
+     * current page (grouped three per row), a pagination row, and a button to
+     * return to the conversation list.
+     */
     @JvmStatic
-    fun createSmsDetailKeyboard(smsId: Long): ArrayList<ArrayList<InlineKeyboardButton>> {
+    fun createThreadKeyboard(
+        threadId: Long,
+        messageIds: List<Long>,
+        currentPage: Int,
+        totalPages: Int
+    ): ArrayList<ArrayList<InlineKeyboardButton>> {
         val keyboard = ArrayList<ArrayList<InlineKeyboardButton>>()
-        keyboard.add(getInlineKeyboardObj("🗑️ Delete", "sms_del_confirm:$smsId"))
-        keyboard.add(getInlineKeyboardObj("◀️ Back", "sms_page:all:0"))
+
+        var row = ArrayList<InlineKeyboardButton>()
+        for (id in messageIds) {
+            row.add(createButton("🗑️ #$id", "sms_tdel_confirm:$id:$threadId"))
+            if (row.size == 3) {
+                keyboard.add(row)
+                row = ArrayList()
+            }
+        }
+        if (row.isNotEmpty()) {
+            keyboard.add(row)
+        }
+
+        val navRow = ArrayList<InlineKeyboardButton>()
+        if (currentPage > 0) {
+            navRow.add(createButton("◀️", "sms_thread:$threadId:${currentPage - 1}"))
+        }
+        navRow.add(createButton("${currentPage + 1}/$totalPages", "sms_thread:$threadId:current"))
+        if (currentPage < totalPages - 1) {
+            navRow.add(createButton("▶️", "sms_thread:$threadId:${currentPage + 1}"))
+        }
+        if (navRow.isNotEmpty()) {
+            keyboard.add(navRow)
+        }
+
+        keyboard.add(getInlineKeyboardObj("◀️ Back", "sms_conv:0"))
         return keyboard
     }
 
+    /**
+     * Delete confirmation shown from within a thread. Cancelling returns to the
+     * thread rather than a flat detail view.
+     */
     @JvmStatic
-    fun createDeleteConfirmKeyboard(smsId: Long): ArrayList<ArrayList<InlineKeyboardButton>> {
+    fun createThreadDeleteConfirmKeyboard(
+        smsId: Long,
+        threadId: Long
+    ): ArrayList<ArrayList<InlineKeyboardButton>> {
         val keyboard = ArrayList<ArrayList<InlineKeyboardButton>>()
         val confirmRow = ArrayList<InlineKeyboardButton>()
-        confirmRow.add(createButton("✅ Confirm", "sms_del:$smsId"))
-        confirmRow.add(createButton("❌ Cancel", "sms_read:$smsId"))
+        confirmRow.add(createButton("✅ Confirm", "sms_tdel:$smsId:$threadId"))
+        confirmRow.add(createButton("❌ Cancel", "sms_thread:$threadId:0"))
         keyboard.add(confirmRow)
         return keyboard
     }
