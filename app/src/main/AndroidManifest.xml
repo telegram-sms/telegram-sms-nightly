@@ -61,7 +61,24 @@
                 <action android:name="android.provider.Telephony.WAP_PUSH_DELIVER" />
                 <data android:mimeType="application/vnd.wap.mms-message" />
             </intent-filter>
+            <!-- WAP_PUSH_DELIVER only reaches the default SMS app. WAP_PUSH_RECEIVED is what
+                 gets broadcast when another app owns the SMS role. -->
+            <intent-filter>
+                <action android:name="android.provider.Telephony.WAP_PUSH_RECEIVED" />
+                <data android:mimeType="application/vnd.wap.mms-message" />
+            </intent-filter>
         </receiver>
+
+        <!-- Target file for SmsManager.downloadMultimediaMessage(), written by the phone process. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.mms.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/mms_file_paths" />
+        </provider>
         <activity
             android:name=".CcActivity"
             android:label="@string/copy_notification_menu"

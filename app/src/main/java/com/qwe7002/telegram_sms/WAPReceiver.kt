@@ -1,18 +1,28 @@
 package com.qwe7002.telegram_sms
 
 import android.Manifest
+import android.app.Activity
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.database.Cursor
-import android.os.Handler
-import android.os.Looper
+import android.net.Uri
+import android.os.Build
+import android.os.PowerManager
+import android.os.SystemClock
+import android.provider.Telephony
+import android.telephony.SmsManager
 import android.telephony.SubscriptionManager
 import android.util.Log
 import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.core.net.toUri
 import com.qwe7002.telegram_sms.data_structure.telegram.RequestMessage
+import com.qwe7002.telegram_sms.static_class.MmsPdu
 import com.qwe7002.telegram_sms.static_class.Other
 import com.qwe7002.telegram_sms.static_class.Phone
 import com.qwe7002.telegram_sms.static_class.TelegramApi
@@ -20,54 +30,41 @@ import com.qwe7002.telegram_sms.static_class.Template
 import com.qwe7002.telegram_sms.value.Const
 import com.tencent.mmkv.MMKV
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.InputStream
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
-
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class WAPReceiver : BroadcastReceiver() {
     companion object {
         private const val MMS_CONTENT_URI = "content://mms"
         private const val MMS_PART_URI = "content://mms/part"
 
-        // MMS part content types for images
-        private val IMAGE_CONTENT_TYPES = listOf(
-            "image/jpeg",
-            "image/jpg",
-            "image/png",
-            "image/gif",
-            "image/bmp",
-            "image/webp"
-        )
+        // m_type of a fully downloaded message (M-Retrieve.conf). A message that is still only a
+        // notification carries 130 and has no parts yet.
+        private const val MESSAGE_TYPE_RETRIEVE_CONF = 132
 
-        // MMS part content types for audio
-        private val AUDIO_CONTENT_TYPES = listOf(
-            "audio/mpeg",
-            "audio/mp3",
-            "audio/aac",
-            "audio/amr",
-            "audio/amr-wb",
-            "audio/ogg",
-            "audio/wav",
-            "audio/3gpp",
-            "audio/mp4",
-            "audio/x-wav",
-            "audio/x-ms-wma"
-        )
+        private const val DOWNLOAD_ACTION = "com.qwe7002.telegram_sms.MMS_DOWNLOADED"
 
-        // MMS part content types for video
-        private val VIDEO_CONTENT_TYPES = listOf(
-            "video/mp4",
-            "video/3gpp",
-            "video/3gpp2",
-            "video/mpeg",
-            "video/webm",
-            "video/x-msvideo",
-            "video/quicktime",
-            "video/h264"
-        )
+        // Both waits have to stay below the 60s the system allows a background broadcast receiver
+        // to run, because the work is kept alive with goAsync().
+        private const val DOWNLOAD_TIMEOUT_MS = 45_000L
+
+        // How long to wait for the default messaging app to finish downloading the MMS before
+        // giving up and forwarding the notification alone.
+        private const val PROVIDER_WAIT_MS = 45_000L
+        private const val PROVIDER_POLL_INTERVAL_MS = 3_000L
+
+        // Clock skew tolerance when deciding whether a stored message is "the one that just
+        // arrived". The mms date column is in seconds.
+        private const val DATE_SLACK_SECONDS = 120L
+
+        private const val WAKELOCK_TIMEOUT_MS = 3 * 60 * 1000L
+
+        private val executor = Executors.newCachedThreadPool()
     }
-
-    private val executor = Executors.newSingleThreadExecutor()
 
     override fun onReceive(context: Context, intent: Intent) {
         MMKV.initialize(context)
@@ -75,7 +72,8 @@ class WAPReceiver : BroadcastReceiver() {
         Log.d(Const.TAG, "Receive action: $action")
 
         if (action != "android.provider.Telephony.WAP_PUSH_RECEIVED" &&
-            action != "android.provider.Telephony.WAP_PUSH_DELIVER") {
+            action != "android.provider.Telephony.WAP_PUSH_DELIVER"
+        ) {
             return
         }
 
@@ -88,6 +86,13 @@ class WAPReceiver : BroadcastReceiver() {
         val contentType = intent.getStringExtra("contentType") ?: intent.type
         if (contentType != "application/vnd.wap.mms-message") {
             Log.d(Const.TAG, "Not an MMS message, content type: $contentType")
+            return
+        }
+
+        val isDefaultSmsApp = Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
+        if (action == "android.provider.Telephony.WAP_PUSH_RECEIVED" && isDefaultSmsApp) {
+            // The default SMS app receives both broadcasts for the same message.
+            Log.i(Const.TAG, "reject: android.provider.Telephony.WAP_PUSH_RECEIVED.")
             return
         }
 
@@ -116,7 +121,7 @@ class WAPReceiver : BroadcastReceiver() {
                         intentSlot = info.simSlotIndex
                     }
                 } catch (e: Exception) {
-                    Log.e(Const.TAG, "Failed to get subscription info: ${e.message}",e)
+                    Log.e(Const.TAG, "Failed to get subscription info: ${e.message}", e)
                 }
             }
         }
@@ -131,153 +136,384 @@ class WAPReceiver : BroadcastReceiver() {
             "Unknown"
         }
 
-        // Parse MMS notification from PDU
-        val mmsInfo = parseMmsNotification(pdu)
+        // The WAP push only carries the notification (M-Notification.ind): sender, subject, size
+        // and the location the actual message has to be downloaded from.
+        val notification = MmsPdu.parse(pdu)
+        Log.d(
+            Const.TAG,
+            "MMS notification: transactionId=${notification.transactionId}, " +
+                    "location=${notification.contentLocation}"
+        )
 
-        // Delay to allow MMS to be stored in content provider
-        Handler(Looper.getMainLooper()).postDelayed({
-            executor.execute {
-                processMMSWithAttachments(context, mmsInfo, dualSim, subId)
+        val receiveTime = System.currentTimeMillis()
+        val applicationContext = context.applicationContext
+        val pendingResult = goAsync()
+        executor.execute {
+            val powerManager = applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+            val wakeLock = powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "${Const.TAG}:WAPReceiver"
+            )
+            wakeLock.acquire(WAKELOCK_TIMEOUT_MS)
+            try {
+                processMMS(
+                    applicationContext,
+                    notification,
+                    dualSim,
+                    subId,
+                    isDefaultSmsApp,
+                    receiveTime
+                )
+            } catch (e: Exception) {
+                Log.e(Const.TAG, "Failed to process MMS: ${e.message}", e)
+            } finally {
+                if (wakeLock.isHeld) {
+                    wakeLock.release()
+                }
+                pendingResult.finish()
             }
-        }, 5000) // 5 second delay to allow MMS download
+        }
     }
 
     /**
-     * Process MMS with attachments from content provider
+     * Resolves the MMS content and forwards it.
+     *
+     * Where the content comes from depends on who owns the message:
+     *  - default SMS app: nobody else downloads it, so download it here.
+     *  - otherwise: the default messaging app downloads it and writes it to the provider, so wait
+     *    for the matching row to show up.
      */
-    private fun processMMSWithAttachments(
+    private fun processMMS(
         context: Context,
-        mmsInfo: MmsInfo,
+        notification: MmsPdu.Message,
         dualSim: String,
-        subId: Int
+        subId: Int,
+        isDefaultSmsApp: Boolean,
+        receiveTime: Long
     ) {
-        // Try to get MMS from content provider
-        val mmsData = getMmsFromContentProvider(context, mmsInfo)
+        val content = if (isDefaultSmsApp) {
+            downloadMms(context, notification, subId)
+        } else {
+            waitForProviderMessage(context, notification, receiveTime)
+        }
 
-        // Update mmsInfo with data from content provider if available
-        if (mmsData.from.isNotEmpty()) {
-            mmsInfo.from = mmsData.from
+        if (content == null) {
+            Log.w(Const.TAG, "Unable to retrieve the MMS content, forwarding the notification only.")
         }
-        if (mmsData.subject.isNotEmpty()) {
-            mmsInfo.subject = mmsData.subject
-        }
-        if (mmsData.textContent.isNotEmpty()) {
-            mmsInfo.textContent = mmsData.textContent
-        }
+
+        val from = content?.from?.takeIf { it.isNotEmpty() }
+            ?: cleanPhoneNumber(notification.from).takeIf { it.isNotEmpty() }
+            ?: "Unknown"
+        val subject = content?.subject?.takeIf { it.isNotEmpty() }
+            ?: notification.subject.takeIf { it.isNotEmpty() }
+            ?: "(No Subject)"
+        val text = content?.textContent?.takeIf { it.isNotEmpty() }
+            ?: if (content == null) "(Unable to retrieve MMS content)" else "(No text content)"
 
         val values = mapOf(
             "SIM" to dualSim,
-            "From" to mmsInfo.from,
-            "Subject" to mmsInfo.subject,
-            "Content" to mmsInfo.textContent.ifEmpty { "(No text content)" },
-            "ContentType" to mmsInfo.contentType,
-            "Size" to mmsInfo.messageSize
+            "From" to from,
+            "Subject" to subject,
+            "Content" to text,
+            "ContentType" to notification.contentType.ifEmpty { "application/vnd.wap.multipart.mixed" },
+            "Size" to formatFileSize(notification.messageSize)
         )
 
         val messageText = Template.render(context, "TPL_received_mms", values)
 
-        // Check if there are media attachments to send
-        val hasMedia = mmsData.images.isNotEmpty() || mmsData.audios.isNotEmpty() || mmsData.videos.isNotEmpty()
+        val images = content?.images.orEmpty()
+        val audios = content?.audios.orEmpty()
+        val videos = content?.videos.orEmpty()
 
-        if (hasMedia) {
-            var captionSent = false
-
-            // Send images with caption
-            if (mmsData.images.isNotEmpty()) {
-                sendImagesToTelegram(context, messageText, mmsData.images, subId)
-                captionSent = true
-            }
-
-            // Send audio files
-            if (mmsData.audios.isNotEmpty()) {
-                val audioCaption = if (captionSent) "" else messageText
-                sendAudiosToTelegram(context, audioCaption, mmsData.audios, subId)
-                captionSent = true
-            }
-
-            // Send video files
-            if (mmsData.videos.isNotEmpty()) {
-                val videoCaption = if (captionSent) "" else messageText
-                sendVideosToTelegram(context, videoCaption, mmsData.videos, subId)
-            }
-        } else {
-            // No media, send text message only
+        if (images.isEmpty() && audios.isEmpty() && videos.isEmpty()) {
             sendTextMessage(context, messageText, subId)
+            return
+        }
+
+        var captionSent = false
+        if (images.isNotEmpty()) {
+            sendMediaList(context, "photo", messageText, images, subId)
+            captionSent = true
+        }
+        if (audios.isNotEmpty()) {
+            sendMediaList(context, "audio", if (captionSent) "" else messageText, audios, subId)
+            captionSent = true
+        }
+        if (videos.isNotEmpty()) {
+            sendMediaList(context, "video", if (captionSent) "" else messageText, videos, subId)
         }
     }
 
     /**
-     * Get MMS data from content provider
+     * Downloads the message from the MMSC. Only the default SMS app is allowed to do this, and it
+     * is the only way to get the content in that mode: the platform stores nothing on our behalf.
      */
-    private fun getMmsFromContentProvider(context: Context, mmsInfo: MmsInfo): MmsData {
-        val mmsData = MmsData()
-
-        try {
-            // Find the latest MMS
-            val mmsId = findLatestMmsId(context, mmsInfo.transactionId)
-            if (mmsId == null) {
-                Log.w(Const.TAG, "Could not find MMS in content provider")
-                return mmsData
-            }
-
-            Log.d(Const.TAG, "Found MMS ID: $mmsId")
-
-            // Get sender address
-            mmsData.from = getMmsAddress(context, mmsId)
-
-            // Get MMS parts (text and images)
-            getMmsParts(context, mmsId, mmsData)
-
-        } catch (e: Exception) {
-            Log.e(Const.TAG, "Error reading MMS from content provider: ${e.message}",e)
+    private fun downloadMms(
+        context: Context,
+        notification: MmsPdu.Message,
+        subId: Int
+    ): MmsContent? {
+        val locationUrl = notification.contentLocation
+        if (locationUrl.isEmpty()) {
+            Log.e(Const.TAG, "MMS notification has no content location.")
+            return null
         }
 
-        return mmsData
-    }
-
-    /**
-     * Find the latest MMS ID, optionally matching transaction ID
-     */
-    private fun findLatestMmsId(context: Context, transactionId: String?): String? {
-        var mmsId: String? = null
-        var cursor: Cursor? = null
+        val directory = File(context.cacheDir, "mms")
+        if (!directory.exists() && !directory.mkdirs()) {
+            Log.e(Const.TAG, "Unable to create the MMS cache directory.")
+            return null
+        }
+        val pduFile = File(directory, "download_${System.currentTimeMillis()}.pdu")
+        var contentUri: Uri? = null
+        var receiver: BroadcastReceiver? = null
 
         try {
-            val uri = MMS_CONTENT_URI.toUri()
-            val projection = arrayOf("_id", "tr_id", "sub", "date")
-
-            cursor = context.contentResolver.query(
-                uri,
-                projection,
-                null,
-                null,
-                "date DESC LIMIT 5"
+            contentUri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.mms.fileprovider",
+                pduFile
             )
 
-            cursor?.let {
-                while (it.moveToNext()) {
-                    val id = it.getString(it.getColumnIndexOrThrow("_id"))
-                    val trId = it.getString(it.getColumnIndexOrThrow("tr_id")) ?: ""
+            val latch = CountDownLatch(1)
+            val downloadResult = AtomicInteger(Activity.RESULT_CANCELED)
+            val action = "$DOWNLOAD_ACTION.${pduFile.name}"
+            val downloadReceiver = object : BroadcastReceiver() {
+                override fun onReceive(receiverContext: Context, receiverIntent: Intent) {
+                    downloadResult.set(resultCode)
+                    latch.countDown()
+                }
+            }
+            receiver = downloadReceiver
+            ContextCompat.registerReceiver(
+                context,
+                downloadReceiver,
+                IntentFilter(action),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
 
-                    // If transaction ID matches or we don't have one, use this MMS
-                    if (transactionId.isNullOrEmpty() || trId == transactionId) {
-                        mmsId = id
-                        break
+            var flags = PendingIntent.FLAG_UPDATE_CURRENT
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                flags = flags or PendingIntent.FLAG_MUTABLE
+            }
+            val downloadedIntent = PendingIntent.getBroadcast(
+                context,
+                0,
+                Intent(action).setPackage(context.packageName),
+                flags
+            )
+
+            // The download runs inside the phone process, which needs write access to our file.
+            context.grantUriPermission(
+                "com.android.phone",
+                contentUri,
+                Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+
+            getSmsManager(context, subId).downloadMultimediaMessage(
+                context,
+                locationUrl,
+                contentUri,
+                null,
+                downloadedIntent
+            )
+
+            if (!latch.await(DOWNLOAD_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                Log.e(Const.TAG, "Timed out while downloading the MMS.")
+                return null
+            }
+            if (downloadResult.get() != Activity.RESULT_OK) {
+                Log.e(Const.TAG, "MMS download failed, result code: ${downloadResult.get()}")
+                return null
+            }
+            if (!pduFile.exists() || pduFile.length() == 0L) {
+                Log.e(Const.TAG, "The downloaded MMS is empty.")
+                return null
+            }
+
+            val retrieveConf = MmsPdu.parse(pduFile.readBytes())
+            Log.d(Const.TAG, "Downloaded MMS with ${retrieveConf.parts.size} part(s).")
+            return toContent(retrieveConf)
+        } catch (e: Exception) {
+            Log.e(Const.TAG, "Error downloading the MMS: ${e.message}", e)
+            return null
+        } finally {
+            receiver?.let {
+                try {
+                    context.unregisterReceiver(it)
+                } catch (e: IllegalArgumentException) {
+                    Log.d(Const.TAG, "Download receiver already unregistered: ${e.message}")
+                }
+            }
+            contentUri?.let {
+                context.revokeUriPermission(
+                    it,
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            pduFile.delete()
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun getSmsManager(context: Context, subId: Int): SmsManager {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val manager = context.getSystemService(SmsManager::class.java)
+            if (manager != null) {
+                return if (subId >= 0) manager.createForSubscriptionId(subId) else manager
+            }
+        }
+        return if (subId >= 0) {
+            SmsManager.getSmsManagerForSubscriptionId(subId)
+        } else {
+            SmsManager.getDefault()
+        }
+    }
+
+    /** Converts a parsed M-Retrieve.conf into the media buckets the forwarder works with. */
+    private fun toContent(message: MmsPdu.Message): MmsContent {
+        val content = MmsContent()
+        content.from = cleanPhoneNumber(message.from)
+        content.subject = message.subject
+
+        for (part in message.parts) {
+            val contentType = part.contentType.lowercase()
+            val fileName = buildFileName(part.name, contentType)
+            when {
+                contentType.startsWith("text/plain") -> {
+                    val text = part.asText()
+                    if (text.isNotEmpty()) {
+                        content.textContent = text
                     }
                 }
 
-                // If no match found, use the most recent one
-                if (mmsId == null && it.moveToFirst()) {
-                    mmsId = it.getString(it.getColumnIndexOrThrow("_id"))
+                contentType.startsWith("image/") ->
+                    content.images.add(MmsMedia(fileName, part.contentType, part.data))
+
+                contentType.startsWith("audio/") ->
+                    content.audios.add(MmsMedia(fileName, part.contentType, part.data))
+
+                contentType.startsWith("video/") ->
+                    content.videos.add(MmsMedia(fileName, part.contentType, part.data))
+            }
+        }
+        return content
+    }
+
+    /**
+     * Waits for the default messaging app to store the downloaded message, then reads it back.
+     *
+     * The message is matched on the transaction id or the content location; a message that is
+     * older than this notification is never accepted, so a previously received MMS can no longer
+     * be forwarded in place of the new one.
+     */
+    private fun waitForProviderMessage(
+        context: Context,
+        notification: MmsPdu.Message,
+        receiveTime: Long
+    ): MmsContent? {
+        if (ActivityCompat.checkSelfPermission(
+                context,
+                Manifest.permission.READ_SMS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.e(Const.TAG, "READ_SMS is not granted, unable to read the MMS.")
+            return null
+        }
+
+        val deadline = SystemClock.elapsedRealtime() + PROVIDER_WAIT_MS
+        while (true) {
+            // Accepting a message that only matches on arrival time is a last resort: keep looking
+            // for the transaction id until the wait is nearly over.
+            val lastAttempt = SystemClock.elapsedRealtime() + PROVIDER_POLL_INTERVAL_MS >= deadline
+            val mmsId = findMmsId(context, notification, receiveTime, lastAttempt)
+            if (mmsId != null) {
+                Log.d(Const.TAG, "Found MMS ID: $mmsId")
+                val content = readMmsFromProvider(context, mmsId)
+                if (content.hasContent()) {
+                    return content
+                }
+                Log.d(Const.TAG, "MMS $mmsId has no readable part yet, waiting.")
+            }
+            if (SystemClock.elapsedRealtime() >= deadline) {
+                Log.w(Const.TAG, "The MMS was not stored by the messaging app in time.")
+                return null
+            }
+            try {
+                Thread.sleep(PROVIDER_POLL_INTERVAL_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return null
+            }
+        }
+    }
+
+    /**
+     * Finds the downloaded message. Only messages received after this notification are considered,
+     * preferring an exact transaction id / content location match.
+     */
+    private fun findMmsId(
+        context: Context,
+        notification: MmsPdu.Message,
+        receiveTime: Long,
+        allowTimeOnlyMatch: Boolean
+    ): String? {
+        var cursor: Cursor? = null
+        try {
+            // The date column is in seconds.
+            val minDate = receiveTime / 1000 - DATE_SLACK_SECONDS
+            cursor = context.contentResolver.query(
+                MMS_CONTENT_URI.toUri(),
+                arrayOf("_id", "tr_id", "ct_l", "date", "m_type"),
+                "m_type=? AND date>=?",
+                arrayOf(MESSAGE_TYPE_RETRIEVE_CONF.toString(), minDate.toString()),
+                "date DESC"
+            ) ?: return null
+
+            var newest: String? = null
+            while (cursor.moveToNext()) {
+                val id = cursor.getString(cursor.getColumnIndexOrThrow("_id")) ?: continue
+                val transactionId = cursor.getString(cursor.getColumnIndexOrThrow("tr_id")).orEmpty()
+                val location = cursor.getString(cursor.getColumnIndexOrThrow("ct_l")).orEmpty()
+
+                if (notification.transactionId.isNotEmpty() &&
+                    transactionId == notification.transactionId
+                ) {
+                    return id
+                }
+                if (notification.contentLocation.isNotEmpty() &&
+                    location == notification.contentLocation
+                ) {
+                    return id
+                }
+                if (newest == null) {
+                    newest = id
                 }
             }
+            // No identifier matched. Everything in this result set still arrived after the
+            // notification, so the newest row is the best guess left once waiting is over.
+            if (allowTimeOnlyMatch && newest != null) {
+                Log.d(Const.TAG, "No transaction id matched, falling back to the newest message.")
+                return newest
+            }
+            return null
         } catch (e: Exception) {
-            Log.e(Const.TAG, "Error finding MMS ID: ${e.message}",e)
+            Log.e(Const.TAG, "Error finding the MMS ID: ${e.message}", e)
+            return null
         } finally {
             cursor?.close()
         }
+    }
 
-        return mmsId
+    private fun readMmsFromProvider(context: Context, mmsId: String): MmsContent {
+        val content = MmsContent()
+        try {
+            content.from = getMmsAddress(context, mmsId)
+            getMmsParts(context, mmsId, content)
+        } catch (e: Exception) {
+            Log.e(Const.TAG, "Error reading the MMS from the content provider: ${e.message}", e)
+        }
+        return content
     }
 
     /**
@@ -303,7 +539,7 @@ class WAPReceiver : BroadcastReceiver() {
                 }
             }
         } catch (e: Exception) {
-            Log.e(Const.TAG, "Error getting MMS address: ${e.message}",e)
+            Log.e(Const.TAG, "Error getting MMS address: ${e.message}", e)
         } finally {
             cursor?.close()
         }
@@ -314,7 +550,7 @@ class WAPReceiver : BroadcastReceiver() {
     /**
      * Get MMS parts (text, images, audio, and video)
      */
-    private fun getMmsParts(context: Context, mmsId: String, mmsData: MmsData) {
+    private fun getMmsParts(context: Context, mmsId: String, content: MmsContent) {
         var cursor: Cursor? = null
 
         try {
@@ -330,58 +566,58 @@ class WAPReceiver : BroadcastReceiver() {
             cursor?.let {
                 while (it.moveToNext()) {
                     val partId = it.getString(it.getColumnIndexOrThrow("_id"))
-                    val contentType = it.getString(it.getColumnIndexOrThrow("ct")) ?: ""
-                    val text = it.getString(it.getColumnIndexOrThrow("text"))
-                    val name = it.getString(it.getColumnIndexOrThrow("name")) ?: "media"
+                    val contentType = optString(it, "ct").orEmpty().lowercase()
+                    val text = optString(it, "text")
+                    // Providers disagree on which column holds the attachment name.
+                    val name = optString(it, "name") ?: optString(it, "fn") ?: optString(it, "cl")
+                    val fileName = buildFileName(name, contentType)
 
                     when {
-                        contentType == "text/plain" -> {
-                            // Text part
-                            if (!text.isNullOrEmpty()) {
-                                mmsData.textContent = text
+                        contentType.startsWith("text/plain") -> {
+                            val partText = if (!text.isNullOrEmpty()) {
+                                text
                             } else {
-                                // Try to read from data
-                                mmsData.textContent = readTextFromPart(context, partId)
+                                readTextFromPart(context, partId)
+                            }
+                            if (partText.isNotEmpty()) {
+                                content.textContent = partText
                             }
                         }
-                        contentType in IMAGE_CONTENT_TYPES -> {
-                            // Image part
-                            val imageData = readMediaFromPart(context, partId)
-                            if (imageData != null) {
-                                val extension = getImageExtensionFromMimeType(contentType)
-                                val fileName = if (name.contains(".")) name else "$name.$extension"
-                                mmsData.images.add(MmsMedia(fileName, contentType, imageData))
-                                Log.d(Const.TAG, "Found image: $fileName, size: ${imageData.size}")
+
+                        contentType.startsWith("image/") -> {
+                            readMediaFromPart(context, partId)?.let { data ->
+                                content.images.add(MmsMedia(fileName, contentType, data))
+                                Log.d(Const.TAG, "Found image: $fileName, size: ${data.size}")
                             }
                         }
-                        contentType in AUDIO_CONTENT_TYPES -> {
-                            // Audio part
-                            val audioData = readMediaFromPart(context, partId)
-                            if (audioData != null) {
-                                val extension = getAudioExtensionFromMimeType(contentType)
-                                val fileName = if (name.contains(".")) name else "$name.$extension"
-                                mmsData.audios.add(MmsMedia(fileName, contentType, audioData))
-                                Log.d(Const.TAG, "Found audio: $fileName, size: ${audioData.size}")
+
+                        contentType.startsWith("audio/") -> {
+                            readMediaFromPart(context, partId)?.let { data ->
+                                content.audios.add(MmsMedia(fileName, contentType, data))
+                                Log.d(Const.TAG, "Found audio: $fileName, size: ${data.size}")
                             }
                         }
-                        contentType in VIDEO_CONTENT_TYPES -> {
-                            // Video part
-                            val videoData = readMediaFromPart(context, partId)
-                            if (videoData != null) {
-                                val extension = getVideoExtensionFromMimeType(contentType)
-                                val fileName = if (name.contains(".")) name else "$name.$extension"
-                                mmsData.videos.add(MmsMedia(fileName, contentType, videoData))
-                                Log.d(Const.TAG, "Found video: $fileName, size: ${videoData.size}")
+
+                        contentType.startsWith("video/") -> {
+                            readMediaFromPart(context, partId)?.let { data ->
+                                content.videos.add(MmsMedia(fileName, contentType, data))
+                                Log.d(Const.TAG, "Found video: $fileName, size: ${data.size}")
                             }
                         }
                     }
                 }
             }
         } catch (e: Exception) {
-            Log.e(Const.TAG, "Error getting MMS parts: ${e.message}",e)
+            Log.e(Const.TAG, "Error getting MMS parts: ${e.message}", e)
         } finally {
             cursor?.close()
         }
+    }
+
+    /** Reads a column that not every provider implementation exposes. */
+    private fun optString(cursor: Cursor, column: String): String? {
+        val index = cursor.getColumnIndex(column)
+        return if (index >= 0) cursor.getString(index) else null
     }
 
     /**
@@ -404,7 +640,7 @@ class WAPReceiver : BroadcastReceiver() {
                 text = buffer.toString("UTF-8")
             }
         } catch (e: Exception) {
-            Log.e(Const.TAG, "Error reading text from part: ${e.message}",e)
+            Log.e(Const.TAG, "Error reading text from part: ${e.message}", e)
         } finally {
             inputStream?.close()
         }
@@ -431,7 +667,7 @@ class WAPReceiver : BroadcastReceiver() {
                 return buffer.toByteArray()
             }
         } catch (e: Exception) {
-            Log.e(Const.TAG, "Error reading image from part: ${e.message}",e)
+            Log.e(Const.TAG, "Error reading image from part: ${e.message}", e)
         } finally {
             inputStream?.close()
         }
@@ -439,25 +675,31 @@ class WAPReceiver : BroadcastReceiver() {
         return null
     }
 
+    /** Builds a file name Telegram accepts, adding the extension the MIME type implies. */
+    private fun buildFileName(name: String?, contentType: String): String {
+        val fallback = when {
+            contentType.startsWith("image/") -> "image"
+            contentType.startsWith("audio/") -> "audio"
+            contentType.startsWith("video/") -> "video"
+            else -> "media"
+        }
+        val baseName = name?.takeIf { it.isNotBlank() } ?: fallback
+        if (baseName.contains(".")) {
+            return baseName
+        }
+        return "$baseName.${getExtensionFromMimeType(contentType)}"
+    }
+
     /**
-     * Get image file extension from MIME type
+     * Get file extension from MIME type
      */
-    private fun getImageExtensionFromMimeType(mimeType: String): String {
-        return when (mimeType) {
+    private fun getExtensionFromMimeType(mimeType: String): String {
+        return when (mimeType.lowercase()) {
             "image/jpeg", "image/jpg" -> "jpg"
             "image/png" -> "png"
             "image/gif" -> "gif"
             "image/bmp" -> "bmp"
             "image/webp" -> "webp"
-            else -> "jpg"
-        }
-    }
-
-    /**
-     * Get audio file extension from MIME type
-     */
-    private fun getAudioExtensionFromMimeType(mimeType: String): String {
-        return when (mimeType) {
             "audio/mpeg", "audio/mp3" -> "mp3"
             "audio/aac" -> "aac"
             "audio/amr" -> "amr"
@@ -467,132 +709,37 @@ class WAPReceiver : BroadcastReceiver() {
             "audio/3gpp" -> "3gp"
             "audio/mp4" -> "m4a"
             "audio/x-ms-wma" -> "wma"
-            else -> "mp3"
-        }
-    }
-
-    /**
-     * Get video file extension from MIME type
-     */
-    private fun getVideoExtensionFromMimeType(mimeType: String): String {
-        return when (mimeType) {
-            "video/mp4" -> "mp4"
+            "video/mp4", "video/h264" -> "mp4"
             "video/3gpp", "video/3gpp2" -> "3gp"
             "video/mpeg" -> "mpeg"
             "video/webm" -> "webm"
             "video/x-msvideo" -> "avi"
             "video/quicktime" -> "mov"
-            "video/h264" -> "mp4"
-            else -> "mp4"
+            else -> mimeType.substringAfterLast('/', "bin").substringBefore('+')
         }
     }
 
     /**
-     * Send images to Telegram using sendPhoto API
+     * Send media to Telegram, the first item carries the caption
      */
-    private fun sendImagesToTelegram(
+    private fun sendMediaList(
         context: Context,
+        mediaType: String,
         caption: String,
-        images: List<MmsMedia>,
+        mediaList: List<MmsMedia>,
         subId: Int
     ) {
-        // Send first image with caption, rest without
-        images.forEachIndexed { index, image ->
-            val imageCaption = if (index == 0) caption else ""
-            sendSingleImage(context, imageCaption, image, subId)
-        }
-    }
-
-    /**
-     * Send a single image to Telegram
-     */
-    private fun sendSingleImage(
-        context: Context,
-        caption: String,
-        image: MmsMedia,
-        subId: Int
-    ) {
-        TelegramApi.sendMedia(
-            context = context,
-            mediaType = "photo",
-            media = TelegramApi.MediaData(image.fileName, image.contentType, image.data),
-            caption = caption,
-            fallbackSubId = if (caption.isNotEmpty()) subId else -1
-        ) {
-            Log.i(Const.TAG, "MMS image sent successfully")
-        }
-    }
-
-    /**
-     * Send audio files to Telegram using sendAudio API
-     */
-    @Suppress("unused")
-    private fun sendAudiosToTelegram(
-        context: Context,
-        caption: String,
-        audios: List<MmsMedia>,
-        subId: Int
-    ) {
-        // Send first audio with caption, rest without
-        audios.forEachIndexed { index, audio ->
-            val audioCaption = if (index == 0) caption else ""
-            sendSingleAudio(context, audioCaption, audio, subId)
-        }
-    }
-
-    /**
-     * Send a single audio file to Telegram
-     */
-    private fun sendSingleAudio(
-        context: Context,
-        caption: String,
-        audio: MmsMedia,
-        subId: Int
-    ) {
-        TelegramApi.sendMedia(
-            context = context,
-            mediaType = "audio",
-            media = TelegramApi.MediaData(audio.fileName, audio.contentType, audio.data),
-            caption = caption,
-            fallbackSubId = if (caption.isNotEmpty()) subId else -1
-        ) {
-            Log.i(Const.TAG, "MMS audio sent successfully")
-        }
-    }
-
-    /**
-     * Send video files to Telegram using sendVideo API
-     */
-    private fun sendVideosToTelegram(
-        context: Context,
-        caption: String,
-        videos: List<MmsMedia>,
-        subId: Int
-    ) {
-        // Send first video with caption, rest without
-        videos.forEachIndexed { index, video ->
-            val videoCaption = if (index == 0) caption else ""
-            sendSingleVideo(context, videoCaption, video, subId)
-        }
-    }
-
-    /**
-     * Send a single video file to Telegram
-     */
-    private fun sendSingleVideo(
-        context: Context,
-        caption: String,
-        video: MmsMedia,
-        subId: Int
-    ) {
-        TelegramApi.sendMedia(
-            context = context,
-            mediaType = "video",
-            media = TelegramApi.MediaData(video.fileName, video.contentType, video.data),
-            caption = caption,
-            fallbackSubId = if (caption.isNotEmpty()) subId else -1
-        ) {
-            Log.i(Const.TAG, "MMS video sent successfully")
+        mediaList.forEachIndexed { index, media ->
+            val mediaCaption = if (index == 0) caption else ""
+            TelegramApi.sendMedia(
+                context = context,
+                mediaType = mediaType,
+                media = TelegramApi.MediaData(media.fileName, media.contentType, media.data),
+                caption = mediaCaption,
+                fallbackSubId = if (mediaCaption.isNotEmpty()) subId else -1
+            ) {
+                Log.i(Const.TAG, "MMS $mediaType sent successfully")
+            }
         }
     }
 
@@ -617,315 +764,11 @@ class WAPReceiver : BroadcastReceiver() {
     }
 
     /**
-     * Parse MMS notification PDU to extract basic information
-     */
-    private fun parseMmsNotification(pdu: ByteArray): MmsInfo {
-        val mmsInfo = MmsInfo()
-        var i = 0
-
-        try {
-            while (i < pdu.size) {
-                val header = pdu[i].toInt() and 0xFF
-                i++
-
-                when (header) {
-                    // X-Mms-Message-Type (0x8C)
-                    0x8C -> {
-                        if (i < pdu.size) {
-                            mmsInfo.messageType = pdu[i].toInt() and 0xFF
-                            i++
-                        }
-                    }
-                    // X-Mms-Transaction-Id (0x98)
-                    0x98 -> {
-                        val result = readTextString(pdu, i)
-                        mmsInfo.transactionId = result.first
-                        i = result.second
-                    }
-                    // X-Mms-MMS-Version (0x8D)
-                    0x8D -> {
-                        if (i < pdu.size) {
-                            i++ // Skip version byte
-                        }
-                    }
-                    // From (0x89)
-                    0x89 -> {
-                        val result = parseEncodedStringValue(pdu, i)
-                        mmsInfo.from = result.first
-                        i = result.second
-                    }
-                    // Subject (0x96)
-                    0x96 -> {
-                        val result = parseEncodedStringValue(pdu, i)
-                        mmsInfo.subject = result.first
-                        i = result.second
-                    }
-                    // X-Mms-Content-Location (0x83)
-                    0x83 -> {
-                        val result = readTextString(pdu, i)
-                        mmsInfo.contentLocation = result.first
-                        i = result.second
-                    }
-                    // X-Mms-Message-Size (0x8E)
-                    0x8E -> {
-                        val result = parseLongInteger(pdu, i)
-                        mmsInfo.messageSize = formatFileSize(result.first)
-                        i = result.second
-                    }
-                    // X-Mms-Expiry (0x88)
-                    0x88 -> {
-                        val result = parseValueLength(pdu, i)
-                        i = result.second + result.first.toInt()
-                    }
-                    // Content-Type (0x84)
-                    0x84 -> {
-                        val result = parseContentType(pdu, i)
-                        mmsInfo.contentType = result.first
-                        i = result.second
-                    }
-                    // Date (0x85)
-                    0x85 -> {
-                        val result = parseLongInteger(pdu, i)
-                        i = result.second
-                    }
-                    else -> {
-                        // Try to skip unknown headers
-                        if (header >= 0x80) {
-                            // Well-known header, try to read value
-                            if (i < pdu.size) {
-                                val valueType = pdu[i].toInt() and 0xFF
-                                if (valueType < 0x1F) {
-                                    // Value-length format
-                                    val result = parseValueLength(pdu, i)
-                                    i = result.second + result.first.toInt()
-                                } else if (valueType >= 0x80) {
-                                    i++ // Short integer
-                                } else {
-                                    // Text or encoded string
-                                    val result = readTextString(pdu, i)
-                                    i = result.second
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(Const.TAG, "Error parsing MMS PDU: ${e.message}",e)
-        }
-
-        // Clean up from address
-        if (mmsInfo.from.isNotEmpty()) {
-            mmsInfo.from = cleanPhoneNumber(mmsInfo.from)
-        }
-
-        if (mmsInfo.from.isEmpty()) {
-            mmsInfo.from = "Unknown"
-        }
-        if (mmsInfo.subject.isEmpty()) {
-            mmsInfo.subject = "(No Subject)"
-        }
-        if (mmsInfo.messageSize.isEmpty()) {
-            mmsInfo.messageSize = "Unknown"
-        }
-        if (mmsInfo.contentType.isEmpty()) {
-            mmsInfo.contentType = "application/vnd.wap.multipart.mixed"
-        }
-
-        return mmsInfo
-    }
-
-    /**
-     * Read text string from PDU
-     */
-    private fun readTextString(pdu: ByteArray, startIndex: Int): Pair<String, Int> {
-        var i = startIndex
-        val sb = StringBuilder()
-
-        while (i < pdu.size && pdu[i].toInt() != 0) {
-            sb.append(pdu[i].toInt().toChar())
-            i++
-        }
-        if (i < pdu.size) {
-            i++ // Skip null terminator
-        }
-
-        return Pair(sb.toString(), i)
-    }
-
-    /**
-     * Parse encoded string value (with charset)
-     */
-    private fun parseEncodedStringValue(pdu: ByteArray, startIndex: Int): Pair<String, Int> {
-        var i = startIndex
-
-        if (i >= pdu.size) {
-            return Pair("", i)
-        }
-
-        val firstByte = pdu[i].toInt() and 0xFF
-
-        // Check if it's a value-length encoded string
-        if (firstByte < 0x1F) {
-            // Value-length followed by charset and text
-            val valueLength = firstByte
-            i++
-
-            if (i >= pdu.size) {
-                return Pair("", i)
-            }
-
-            // Check for address-present token (0x80)
-            val token = pdu[i].toInt() and 0xFF
-            if (token == 0x80) {
-                i++
-                // Read the encoded address
-                val endIndex = minOf(i + valueLength - 1, pdu.size)
-                val sb = StringBuilder()
-                while (i < endIndex && pdu[i].toInt() != 0) {
-                    val c = pdu[i].toInt() and 0xFF
-                    if (c >= 0x20 && c < 0x7F) {
-                        sb.append(c.toChar())
-                    }
-                    i++
-                }
-                if (i < pdu.size && pdu[i].toInt() == 0) {
-                    i++
-                }
-                return Pair(sb.toString(), i)
-            } else {
-                // Skip charset if present
-                if (token >= 0x80) {
-                    i++
-                }
-                val sb = StringBuilder()
-                val endIndex = minOf(startIndex + valueLength + 1, pdu.size)
-                while (i < endIndex && pdu[i].toInt() != 0) {
-                    val c = pdu[i].toInt() and 0xFF
-                    if (c >= 0x20 && c < 0x7F) {
-                        sb.append(c.toChar())
-                    }
-                    i++
-                }
-                if (i < pdu.size && pdu[i].toInt() == 0) {
-                    i++
-                }
-                return Pair(sb.toString(), i)
-            }
-        } else if (firstByte == 0x1F) {
-            // Quote followed by length
-            i++
-            if (i >= pdu.size) {
-                return Pair("", i)
-            }
-            val length = pdu[i].toInt() and 0x7F
-            i++
-            val sb = StringBuilder()
-            val endIndex = minOf(i + length, pdu.size)
-            while (i < endIndex && pdu[i].toInt() != 0) {
-                sb.append(pdu[i].toInt().toChar())
-                i++
-            }
-            if (i < pdu.size && pdu[i].toInt() == 0) {
-                i++
-            }
-            return Pair(sb.toString(), i)
-        } else {
-            // Plain text string
-            return readTextString(pdu, i)
-        }
-    }
-
-    /**
-     * Parse value-length format
-     */
-    private fun parseValueLength(pdu: ByteArray, startIndex: Int): Pair<Long, Int> {
-        var i = startIndex
-
-        if (i >= pdu.size) {
-            return Pair(0L, i)
-        }
-
-        val firstByte = pdu[i].toInt() and 0xFF
-
-        if (firstByte < 0x1F) {
-            i++
-            return Pair(firstByte.toLong(), i)
-        } else if (firstByte == 0x1F) {
-            i++
-            if (i >= pdu.size) {
-                return Pair(0L, i)
-            }
-            val length = pdu[i].toInt() and 0x7F
-            i++
-            return Pair(length.toLong(), i)
-        }
-
-        return Pair(0L, i)
-    }
-
-    /**
-     * Parse long integer from PDU
-     */
-    private fun parseLongInteger(pdu: ByteArray, startIndex: Int): Pair<Long, Int> {
-        var i = startIndex
-
-        if (i >= pdu.size) {
-            return Pair(0L, i)
-        }
-
-        val firstByte = pdu[i].toInt() and 0xFF
-
-        // Short-length format (1-30 bytes)
-        if (firstByte <= 30) {
-            val length = firstByte
-            i++
-            var value = 0L
-            repeat(length) {
-                if (i < pdu.size) {
-                    value = (value shl 8) or (pdu[i].toLong() and 0xFF)
-                    i++
-                }
-            }
-            return Pair(value, i)
-        }
-
-        return Pair(0L, i)
-    }
-
-    /**
-     * Parse content type from PDU
-     */
-    private fun parseContentType(pdu: ByteArray, startIndex: Int): Pair<String, Int> {
-        var i = startIndex
-
-        if (i >= pdu.size) {
-            return Pair("", i)
-        }
-
-        val firstByte = pdu[i].toInt() and 0xFF
-
-        // Well-known media type
-        if (firstByte >= 0x80) {
-            i++
-            val mediaType = when (firstByte and 0x7F) {
-                0x23 -> "application/vnd.wap.multipart.mixed"
-                0x24 -> "application/vnd.wap.multipart.related"
-                0x25 -> "application/vnd.wap.multipart.alternative"
-                else -> "application/vnd.wap.multipart.mixed"
-            }
-            return Pair(mediaType, i)
-        }
-
-        // Text format content type
-        return readTextString(pdu, i)
-    }
-
-    /**
      * Format file size to human readable format
      */
     private fun formatFileSize(bytes: Long): String {
         return when {
+            bytes <= 0 -> "Unknown"
             bytes < 1024 -> "$bytes B"
             bytes < 1024 * 1024 -> "${bytes / 1024} KB"
             else -> "${bytes / (1024 * 1024)} MB"
@@ -960,30 +803,19 @@ class WAPReceiver : BroadcastReceiver() {
     }
 
     /**
-     * Data class to hold MMS information from PDU
+     * Data class to hold the resolved MMS content
      */
-    private data class MmsInfo(
-        var messageType: Int = 0,
-        var transactionId: String = "",
-        var from: String = "",
-        var subject: String = "",
-        var contentLocation: String = "",
-        var messageSize: String = "",
-        var contentType: String = "",
-        var textContent: String = ""
-    )
-
-    /**
-     * Data class to hold MMS data from content provider
-     */
-    private data class MmsData(
+    private data class MmsContent(
         var from: String = "",
         var subject: String = "",
         var textContent: String = "",
-        var images: MutableList<MmsMedia> = mutableListOf(),
-        var audios: MutableList<MmsMedia> = mutableListOf(),
-        var videos: MutableList<MmsMedia> = mutableListOf()
-    )
+        val images: MutableList<MmsMedia> = mutableListOf(),
+        val audios: MutableList<MmsMedia> = mutableListOf(),
+        val videos: MutableList<MmsMedia> = mutableListOf()
+    ) {
+        fun hasContent(): Boolean =
+            textContent.isNotEmpty() || images.isNotEmpty() || audios.isNotEmpty() || videos.isNotEmpty()
+    }
 
     /**
      * Data class to hold MMS media (image/audio/video)
